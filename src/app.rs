@@ -3,7 +3,7 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Utc};
 use egui::{
-    self, Align, Align2, Button, Color32, CornerRadius, FontId, Layout, Order, RichText,
+    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Order, RichText,
     ScrollArea, Sense, Stroke, StrokeKind, Vec2,
 };
 use uuid::Uuid;
@@ -12,8 +12,8 @@ use crate::categories::{category_label, CATEGORIES};
 use crate::dates::{
     end_of_month, end_of_week, format_date_key, format_day_full, format_local_time,
     format_month_year, get_month_grid, is_in_current_week, is_same_month, is_today,
-    iso_weekday_labels, month_offset_for_date, parse_date_key, start_of_month, start_of_week,
-    today_local,
+    iso_weekday_labels, items_for_day, month_offset_for_date, parse_date_key, start_of_month,
+    start_of_week, today_local,
 };
 use crate::markdown::generate_markdown_for_range;
 use crate::models::{
@@ -22,10 +22,18 @@ use crate::models::{
 };
 use crate::storage::{load_items, load_prefs, save_items, save_prefs, storage_dir_display};
 use crate::theme::{apply_visuals, Palette, ThemeId};
+use crate::ui::icons::{
+    self, icon_label, icon_text, CALENDAR_BLANK, CARET_LEFT, CARET_RIGHT, COPY, EXPORT, GEAR,
+    PALETTE, PENCIL, PLUS, PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH,
+};
 use crate::ui::chrome::{
-    achievement_indicator, calendar_outer_frame, card_frame, modal_content_frame,
-    paint_modal_backdrop, primary_button, secondary_button, splash_gradient,
-    toolbar_panel_frame, toolbar_text_button, CAL_DAY_CELL, CAL_WEEK_COL_WIDTH, SPACE_MD, SPACE_SM,
+    achievement_indicator, cal_day_cell_for_layout, cal_month_grid_content_height,
+    calendar_column_width, calendar_outer_frame,
+    card_frame, detail_column_frame, modal_content_frame, paint_modal_backdrop,
+    paint_vertical_gradient_band, paint_week_column_cell, pill_button, primary_button,
+    secondary_button, splash_gradient, toolbar_action_button, toolbar_divider,
+    toolbar_gradient, toolbar_panel_frame, toolbar_text_button, CAL_WEEK_COL_WIDTH,
+    DETAIL_COLUMN_MIN_WIDTH, SPACE_MD, SPACE_SM, SPACE_XS,
 };
 use crate::updates::{self, UpdateCheckResult};
 
@@ -98,6 +106,7 @@ pub struct WeeklyTrackerApp {
 
 impl WeeklyTrackerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        icons::install_phosphor_font(&cc.egui_ctx);
         let prefs = load_prefs();
         let theme = ThemeId::from_pref(&prefs.theme);
         apply_visuals(&cc.egui_ctx, theme);
@@ -402,15 +411,9 @@ impl WeeklyTrackerApp {
                     self.dismiss_splash(ctx);
                 }
                 let (top, bottom) = splash_gradient(palette);
-                let mut mesh = egui::Mesh::default();
-                let vi = mesh.vertices.len() as u32;
-                mesh.colored_vertex(rect.left_top(), Color32::from_rgba_unmultiplied(top.r(), top.g(), top.b(), alpha));
-                mesh.colored_vertex(rect.right_top(), Color32::from_rgba_unmultiplied(bottom.r(), bottom.g(), bottom.b(), alpha));
-                mesh.colored_vertex(rect.right_bottom(), Color32::from_rgba_unmultiplied(bottom.r(), bottom.g(), bottom.b(), alpha));
-                mesh.colored_vertex(rect.left_bottom(), Color32::from_rgba_unmultiplied(top.r(), top.g(), top.b(), alpha));
-                mesh.add_triangle(vi, vi + 1, vi + 2);
-                mesh.add_triangle(vi, vi + 2, vi + 3);
-                ui.painter().add(egui::Shape::mesh(mesh));
+                let top_a = Color32::from_rgba_unmultiplied(top.r(), top.g(), top.b(), alpha);
+                let bottom_a = Color32::from_rgba_unmultiplied(bottom.r(), bottom.g(), bottom.b(), alpha);
+                paint_vertical_gradient_band(ui.painter(), rect, top_a, bottom_a);
 
                 let icon_center = rect.center() - Vec2::new(0.0, 48.0);
                 ui.painter().circle_stroke(
@@ -495,7 +498,14 @@ impl eframe::App for WeeklyTrackerApp {
                 });
         }
 
-        egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("footer")
+            .frame(
+                egui::Frame::NONE
+                    .fill(palette.background)
+                    .inner_margin(egui::Margin::symmetric(SPACE_MD as i8, SPACE_XS as i8)),
+            )
+            .show(ctx, |ui| {
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
@@ -519,21 +529,48 @@ impl eframe::App for WeeklyTrackerApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(palette.background))
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.x = SPACE_MD;
+                let total_w = ui.available_width();
+                let total_h = ui.available_height();
+                let cal_w = calendar_column_width(total_w, SPACE_MD);
+                let divider_w = 1.0;
+                let detail_w =
+                    (total_w - cal_w - SPACE_MD - divider_w).max(DETAIL_COLUMN_MIN_WIDTH);
+
                 ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_max_width(360.0);
-                        self.month_calendar(ui, palette);
-                    });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_min_width(320.0);
-                        if self.form_mode.is_some() {
-                            self.item_form(ui, palette);
-                        } else {
-                            self.day_detail(ui, palette);
-                        }
-                    });
+                    ui.set_width(total_w);
+                    ui.spacing_mut().item_spacing.x = SPACE_MD;
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(cal_w, total_h),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            ui.set_width(cal_w);
+                            ui.set_min_height(total_h);
+                            self.month_calendar(ui, palette);
+                        },
+                    );
+
+                    let (div_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(divider_w, total_h), Sense::hover());
+                    ui.painter().rect_filled(div_rect, 0, palette.border);
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(detail_w, total_h),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            ui.set_width(detail_w);
+                            ui.set_min_height(total_h);
+                            detail_column_frame(palette).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.set_min_height(total_h - SPACE_MD as f32 * 2.0);
+                                if self.form_mode.is_some() {
+                                    self.item_form(ui, palette);
+                                } else {
+                                    self.day_detail(ui, palette);
+                                }
+                            });
+                        },
+                    );
                 });
             });
 
@@ -552,44 +589,93 @@ impl eframe::App for WeeklyTrackerApp {
 impl WeeklyTrackerApp {
     fn toolbar(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let grid = get_month_grid(self.month_offset);
+        let bar = ui.max_rect();
+        let (top, bottom) = toolbar_gradient(palette);
+        paint_vertical_gradient_band(ui.painter(), bar, top, bottom);
+
+        ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.x = SPACE_SM;
+        let divider_h = ui.available_height().max(28.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new(APP_NAME).strong().color(palette.text));
-            if toolbar_text_button(ui, palette, "◀").clicked() {
+            ui.set_width(ui.available_width());
+            ui.label(
+                icon_label(TIMER, APP_NAME, 16.0, palette.toolbar_fg).strong(),
+            );
+            if toolbar_text_button(
+                ui,
+                palette,
+                icon_text(CARET_LEFT, 16.0, palette.toolbar_fg),
+            )
+            .on_hover_text("Previous month")
+            .clicked()
+            {
                 self.month_offset -= 1;
             }
-            if toolbar_text_button(ui, palette, "Today").clicked() {
+            if toolbar_text_button(
+                ui,
+                palette,
+                icon_label(CALENDAR_BLANK, "Today", 14.0, palette.toolbar_fg),
+            )
+            .clicked()
+            {
                 self.month_offset = 0;
                 self.pinned_date = None;
             }
-            if toolbar_text_button(ui, palette, "▶").clicked() {
+            if toolbar_text_button(
+                ui,
+                palette,
+                icon_text(CARET_RIGHT, 16.0, palette.toolbar_fg),
+            )
+            .on_hover_text("Next month")
+            .clicked()
+            {
                 self.month_offset += 1;
             }
             ui.add_space(SPACE_SM);
-            ui.separator();
+            toolbar_divider(ui, divider_h);
             ui.add_space(SPACE_SM);
             ui.label(
                 RichText::new(format_month_year(grid.month))
                     .size(18.0)
                     .strong()
-                    .color(palette.text),
+                    .color(palette.toolbar_fg),
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_SM;
-                if secondary_button(ui, palette, "Export").clicked() {
+                if toolbar_action_button(
+                    ui,
+                    palette,
+                    icon_label(EXPORT, "Export", 14.0, palette.primary),
+                )
+                .clicked()
+                {
                     self.show_export = true;
                 }
-                if secondary_button(ui, palette, "Settings").clicked() {
+                if toolbar_action_button(
+                    ui,
+                    palette,
+                    icon_label(GEAR, "Settings", 14.0, palette.primary),
+                )
+                .clicked()
+                {
                     self.show_settings = true;
                 }
 
-                ui.menu_button(
-                    RichText::new("Theme").color(palette.text),
-                    |ui| {
+                let theme_btn = toolbar_text_button(
+                    ui,
+                    palette,
+                    icon_label(PALETTE, "Theme", 14.0, palette.toolbar_fg),
+                );
+                let bar_id = ui.id().with("toolbar_theme_bar");
+                let mut bar_state = egui::menu::BarState::load(ui.ctx(), bar_id);
+                let _ = bar_state.bar_menu(&theme_btn, |ui| {
                     for t in ThemeId::ALL {
                         if ui
-                            .selectable_label(self.theme == t, format!("{} — {}", t.label(), t.description()))
+                            .selectable_label(
+                                self.theme == t,
+                                format!("{} — {}", t.label(), t.description()),
+                            )
                             .clicked()
                         {
                             self.set_theme(ui.ctx(), t);
@@ -597,6 +683,7 @@ impl WeeklyTrackerApp {
                         }
                     }
                 });
+                bar_state.store(ui.ctx(), bar_id);
             });
         });
     }
@@ -607,6 +694,13 @@ impl WeeklyTrackerApp {
         let achievements = self.achievement_dates();
         let radius = CornerRadius::same(6);
         let cell_gap = SPACE_SM;
+        let col_w = ui.available_width();
+        // "Calendar" title, weekday header row, and spacing above the bordered week grid.
+        let header_reserve = 20.0 + SPACE_SM + 20.0 + SPACE_SM;
+        let scroll_h = (ui.available_height() - header_reserve).max(0.0);
+        let day_cell = cal_day_cell_for_layout(col_w, grid.weeks.len(), scroll_h);
+        let grid_content_h = cal_month_grid_content_height(grid.weeks.len(), day_cell);
+        let scroll_max_h = grid_content_h.min(scroll_h);
 
         ui.label(
             RichText::new("Calendar")
@@ -627,45 +721,53 @@ impl WeeklyTrackerApp {
                     let width = if i == 0 {
                         CAL_WEEK_COL_WIDTH
                     } else {
-                        CAL_DAY_CELL.x
+                        day_cell.x
                     };
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(width, 18.0),
-                        Layout::top_down(Align::Center),
-                        |ui| {
-                            ui.label(RichText::new(*label).small().color(palette.text_muted));
-                        },
-                    );
+                    let size = Vec2::new(width, 20.0);
+                    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                    if i == 0 {
+                        paint_week_column_cell(
+                            ui.painter(),
+                            rect,
+                            radius,
+                            palette,
+                            false,
+                            label,
+                        );
+                    } else {
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            *label,
+                            FontId::proportional(11.0),
+                            palette.text_muted,
+                        );
+                    }
                 }
                 ui.end_row();
             });
 
-        ScrollArea::vertical().show(ui, |ui| {
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height(scroll_max_h)
+            .show(ui, |ui| {
+            ui.set_width(col_w);
             calendar_outer_frame(palette).show(ui, |ui| {
+                ui.set_width((col_w - SPACE_SM * 2.0).max(0.0));
                 ui.spacing_mut().item_spacing = Vec2::new(cell_gap, cell_gap);
                 for week in &grid.weeks {
                     let current_week = week.days.iter().any(|&d| is_in_current_week(d));
                     ui.horizontal(|ui| {
-                        let wk_size = Vec2::new(CAL_WEEK_COL_WIDTH, CAL_DAY_CELL.y);
+                        let wk_size = Vec2::new(CAL_WEEK_COL_WIDTH, day_cell.y);
                         let (wk_rect, _) = ui.allocate_exact_size(wk_size, Sense::hover());
-                            let wk_bg = if current_week {
-                                palette.cal_focus
-                            } else {
-                                palette.background
-                            };
-                            ui.painter()
-                                .rect_filled(wk_rect, radius, wk_bg);
-                            ui.painter().text(
-                                wk_rect.center(),
-                                Align2::CENTER_CENTER,
-                                format!("{}", week.week_number),
-                                FontId::proportional(11.0),
-                                if current_week {
-                                    palette.primary
-                                } else {
-                                    palette.text_muted
-                                },
-                            );
+                        paint_week_column_cell(
+                            ui.painter(),
+                            wk_rect,
+                            radius,
+                            palette,
+                            current_week,
+                            &format!("{}", week.week_number),
+                        );
 
                             for &date in &week.days {
                                 let key = format_date_key(date);
@@ -677,12 +779,12 @@ impl WeeklyTrackerApp {
                                 let has_ach = achievements.contains(&key);
 
                                 let (rect, response) =
-                                    ui.allocate_exact_size(CAL_DAY_CELL, Sense::click());
+                                    ui.allocate_exact_size(day_cell, Sense::click());
 
                                 let mut bg = if in_month {
                                     palette.surface
                                 } else {
-                                    palette.background
+                                    palette.cal_cell_out_bg
                                 };
                                 if current_week && !focused && !hovered && !today {
                                     bg = palette.cal_week_row;
@@ -706,13 +808,20 @@ impl WeeklyTrackerApp {
                                 }
 
                                 let day_color = if in_month {
-                                    palette.text
+                                    palette.cal_cell_in_text
                                 } else {
-                                    palette.text_muted
+                                    palette.cal_cell_out_text
                                 };
                                 let mut day_center = rect.center();
                                 if count > 0 || has_ach {
                                     day_center.y -= 4.0;
+                                }
+                                if today {
+                                    ui.painter().circle_filled(
+                                        day_center,
+                                        11.0,
+                                        palette.cal_day_today_bg,
+                                    );
                                 }
                                 ui.painter().text(
                                     day_center,
@@ -720,7 +829,7 @@ impl WeeklyTrackerApp {
                                     format!("{}", date.day()),
                                     FontId::proportional(13.0),
                                     if today {
-                                        palette.accent
+                                        palette.cal_day_today_fg
                                     } else {
                                         day_color
                                     },
@@ -728,11 +837,11 @@ impl WeeklyTrackerApp {
 
                                 if count > 0 || has_ach {
                                     let dot_color = if count >= 3 {
-                                        palette.primary
+                                        palette.cal_dot_3
                                     } else if count >= 2 {
-                                        palette.accent
+                                        palette.cal_dot_2
                                     } else {
-                                        palette.text_muted
+                                        palette.cal_dot_1
                                     };
                                     ui.painter().circle_filled(
                                         rect.center() + Vec2::new(-4.0, 14.0),
@@ -776,58 +885,116 @@ impl WeeklyTrackerApp {
 
     fn day_detail(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let date = self.display_date();
-        let day_items: Vec<WorkItem> = self
-            .items
-            .iter()
-            .filter(|i| i.date == format_date_key(date))
+        let day_items: Vec<WorkItem> = items_for_day(&self.items, date)
+            .into_iter()
             .cloned()
             .collect();
         let today = is_today(date);
         let pinned = self.pinned_date == Some(date);
 
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.heading(format_day_full(date));
-                ui.label(
-                    RichText::new(format!(
-                        "{} {}",
-                        day_items.len(),
-                        if day_items.len() == 1 {
-                            "item"
+        let header_h = 58.0;
+        let header_w = ui.available_width();
+        let (header_rect, _) = ui.allocate_exact_size(Vec2::new(header_w, header_h), Sense::hover());
+        if today {
+            paint_vertical_gradient_band(
+                ui.painter(),
+                header_rect,
+                palette.day_header_today_start,
+                palette.day_header_today_end,
+            );
+        } else {
+            ui.painter()
+                .rect_filled(header_rect, CornerRadius::same(0), palette.surface);
+        }
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(header_rect), |ui| {
+            ui.add_space(SPACE_SM);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.heading(
+                        RichText::new(format_day_full(date))
+                            .color(if today {
+                                Color32::WHITE
+                            } else {
+                                palette.text
+                            }),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {}",
+                            day_items.len(),
+                            if day_items.len() == 1 {
+                                "item"
+                            } else {
+                                "items"
+                            }
+                        ))
+                        .small()
+                        .color(if today {
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
                         } else {
-                            "items"
-                        }
-                    ))
-                    .small()
-                    .color(palette.text_muted),
-                );
-                if today {
-                    ui.label(RichText::new("· Today").small().color(palette.accent));
-                }
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .button(if pinned { "Unpin" } else { "Pin day" })
+                            palette.text_muted
+                        }),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let pin_icon = if pinned { PUSH_PIN_SLASH } else { PUSH_PIN };
+                    let pin_label = if pinned { "Unpin" } else { "Pin day" };
+                    let pin_fg = if today {
+                        Color32::WHITE
+                    } else {
+                        palette.primary
+                    };
+                    let pin_fill = if today {
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 40)
+                    } else {
+                        palette.cal_hover
+                    };
+                    if pill_button(
+                        ui,
+                        icon_label(pin_icon, pin_label, 14.0, pin_fg),
+                        pin_fill,
+                        pin_fg,
+                        Stroke::new(1.0, if today { pin_fill } else { palette.border }),
+                    )
                     .clicked()
-                {
-                    self.pinned_date = if pinned { None } else { Some(date) };
-                }
-                if primary_button(ui, palette, "+ Add").clicked() {
-                    self.open_add_form(date);
-                }
+                    {
+                        self.pinned_date = if pinned { None } else { Some(date) };
+                    }
+                    if primary_button(
+                        ui,
+                        palette,
+                        icon_label(PLUS, "Add", 14.0, Color32::WHITE),
+                    )
+                    .clicked()
+                    {
+                        self.open_add_form(date);
+                    }
+                });
             });
         });
         ui.add_space(SPACE_SM);
         ui.separator();
 
         if day_items.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                ui.label(RichText::new("No items for this day").color(palette.text_muted));
-                if primary_button(ui, palette, "+ Add Work Item").clicked() {
-                    self.open_add_form(date);
-                }
-            });
+            let pane_h = ui.available_height().max(160.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), pane_h),
+                Layout::top_down(Align::Center),
+                |ui| {
+                    ui.add_space(pane_h * 0.18);
+                    ui.label(RichText::new("No items for this day").color(palette.text_muted));
+                    ui.add_space(SPACE_SM);
+                    if primary_button(
+                        ui,
+                        palette,
+                        icon_label(PLUS, "Add Work Item", 14.0, Color32::WHITE),
+                    )
+                    .clicked()
+                    {
+                        self.open_add_form(date);
+                    }
+                },
+            );
         } else {
             ScrollArea::vertical().show(ui, |ui| {
                 for item in &day_items {
@@ -848,7 +1015,7 @@ impl WeeklyTrackerApp {
                                     ui.label(
                                         RichText::new(category_label(&item.category))
                                             .small()
-                                            .color(palette.primary),
+                                            .color(palette.accent),
                                     );
                                     ui.label(
                                         RichText::new(format_local_time(item.updated_at))
@@ -858,18 +1025,22 @@ impl WeeklyTrackerApp {
                                 });
                             });
                             ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
-                                if ui.small_button("Copy").clicked() {
+                                if icons::small_icon_button(ui, palette, COPY, "Copy to another day")
+                                    .clicked()
+                                {
                                     self.copy_source_id = Some(id.clone());
                                     if let Some(d) = parse_date_key(&item.date) {
                                         self.copy_target_date =
                                             format_date_key(d + Duration::days(1));
                                     }
                                 }
-                                if ui.small_button("Delete").clicked() {
+                                if icons::small_icon_button(ui, palette, TRASH, "Delete").clicked() {
                                     self.delete_item(&id);
                                 }
-                                if ui.small_button("Edit").clicked() {
-                                    if let Some(full) = self.items.iter().find(|i| i.id == id).cloned() {
+                                if icons::small_icon_button(ui, palette, PENCIL, "Edit").clicked() {
+                                    if let Some(full) =
+                                        self.items.iter().find(|i| i.id == id).cloned()
+                                    {
                                         self.open_edit_form(&full);
                                     }
                                 }
@@ -878,7 +1049,13 @@ impl WeeklyTrackerApp {
                     });
                     ui.add_space(SPACE_SM);
                 }
-                if primary_button(ui, palette, "Add Work Item").clicked() {
+                if primary_button(
+                    ui,
+                    palette,
+                    icon_label(PLUS, "Add Work Item", 14.0, Color32::WHITE),
+                )
+                .clicked()
+                {
                     self.open_add_form(date);
                 }
             });
@@ -926,17 +1103,11 @@ impl WeeklyTrackerApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let can_save = !self.form_title.trim().is_empty();
-                if ui
-                    .add_enabled(
-                        can_save,
-                        Button::new("Save")
-                            .fill(palette.primary)
-                            .stroke(Stroke::new(1.0, palette.primary)),
-                    )
-                    .clicked()
-                {
-                    self.submit_form();
-                }
+                ui.add_enabled_ui(can_save, |ui| {
+                    if primary_button(ui, palette, "Save").clicked() {
+                        self.submit_form();
+                    }
+                });
                 if secondary_button(ui, palette, "Cancel").clicked() {
                     self.cancel_form();
                 }
@@ -945,100 +1116,136 @@ impl WeeklyTrackerApp {
     }
 
     fn export_modal(&mut self, ctx: &egui::Context, palette: Palette) {
-        paint_modal_backdrop(ctx, palette);
+        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("export_modal_backdrop"));
+        if backdrop.clicked() {
+            self.show_export = false;
+        }
+        let mut open = true;
         egui::Window::new("Export Report")
+            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_width(520.0)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 modal_content_frame().show(ui, |ui| {
                     ui.label(
-                        RichText::new("Export Report")
-                            .size(20.0)
+                        RichText::new("Date range")
+                            .small()
                             .strong()
-                            .color(palette.text),
+                            .color(palette.text_muted),
                     );
-                    ui.add_space(SPACE_SM);
-                    ui.label("Date range");
-                ui.horizontal(|ui| {
-                    ui.label("From");
-                    ui.text_edit_singleline(&mut self.export_start);
-                    ui.label("To");
-                    ui.text_edit_singleline(&mut self.export_end);
-                });
-
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("This week").clicked() {
-                        let t = today_local();
-                        self.export_start = format_date_key(start_of_week(t));
-                        self.export_end = format_date_key(end_of_week(t));
-                    }
-                    if ui.button("Last 7 days").clicked() {
-                        let t = today_local();
-                        self.export_start = format_date_key(t - Duration::days(6));
-                        self.export_end = format_date_key(t);
-                    }
-                    if ui.button("Last 30 days").clicked() {
-                        let t = today_local();
-                        self.export_start = format_date_key(t - Duration::days(29));
-                        self.export_end = format_date_key(t);
-                    }
-                    if ui.button("This month").clicked() {
-                        let t = today_local();
-                        self.export_start = format_date_key(start_of_month(t));
-                        self.export_end = format_date_key(end_of_month(t));
-                    }
-                });
-
-                let valid = match (
-                    parse_date_key(&self.export_start),
-                    parse_date_key(&self.export_end),
-                ) {
-                    (Some(a), Some(b)) => a <= b,
-                    _ => false,
-                };
-
-                if !valid {
-                    ui.colored_label(Color32::RED, "Enter a valid range (start ≤ end).");
-                } else if let (Some(start), Some(end)) = (
-                    parse_date_key(&self.export_start),
-                    parse_date_key(&self.export_end),
-                ) {
-                    let md = generate_markdown_for_range(&self.items, start, end);
-                    ui.separator();
-                    ui.label(RichText::new("Preview").small().strong());
-                    ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                        ui.monospace(&md);
+                    ui.horizontal(|ui| {
+                        ui.label("From");
+                        ui.text_edit_singleline(&mut self.export_start);
+                        ui.label("To");
+                        ui.text_edit_singleline(&mut self.export_end);
                     });
 
-                    if primary_button(ui, palette, "Download .md").clicked() {
-                        let filename =
-                            format!("report-{}-to-{}.md", self.export_start, self.export_end);
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_title("Time Tracker — Export Report")
-                            .set_file_name(&filename)
-                            .add_filter("Markdown", &["md"])
-                            .save_file()
-                        {
-                            if std::fs::write(&path, &md).is_ok() {
-                                let _ = open::that(path);
-                            }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("This week").clicked() {
+                            let t = today_local();
+                            self.export_start = format_date_key(start_of_week(t));
+                            self.export_end = format_date_key(end_of_week(t));
                         }
-                    }
-                }
+                        if ui.button("Last 7 days").clicked() {
+                            let t = today_local();
+                            self.export_start = format_date_key(t - Duration::days(6));
+                            self.export_end = format_date_key(t);
+                        }
+                        if ui.button("Last 30 days").clicked() {
+                            let t = today_local();
+                            self.export_start = format_date_key(t - Duration::days(29));
+                            self.export_end = format_date_key(t);
+                        }
+                        if ui.button("This month").clicked() {
+                            let t = today_local();
+                            self.export_start = format_date_key(start_of_month(t));
+                            self.export_end = format_date_key(end_of_month(t));
+                        }
+                    });
 
-                    if secondary_button(ui, palette, "Close").clicked() {
-                        self.show_export = false;
+                    let range = match (
+                        parse_date_key(&self.export_start),
+                        parse_date_key(&self.export_end),
+                    ) {
+                        (Some(start), Some(end)) if start <= end => Some((start, end)),
+                        _ => None,
+                    };
+
+                    if range.is_none()
+                        && !self.export_start.is_empty()
+                        && !self.export_end.is_empty()
+                    {
+                        ui.colored_label(Color32::RED, "Enter a valid range (start ≤ end).");
                     }
+
+                    ui.separator();
+                    ui.label(RichText::new("Preview").small().strong());
+                    ScrollArea::vertical()
+                        .id_salt("export_preview")
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            if let Some((start, end)) = range {
+                                let md = generate_markdown_for_range(&self.items, start, end);
+                                ui.monospace(&md);
+                            } else {
+                                ui.label(
+                                    RichText::new("Select a valid date range to preview")
+                                        .color(palette.text_muted),
+                                );
+                            }
+                        });
+
+                    ui.add_space(SPACE_SM);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if let Some((start, end)) = range {
+                                if primary_button(ui, palette, "Download .md").clicked() {
+                                    let md = generate_markdown_for_range(&self.items, start, end);
+                                    let filename = format!(
+                                        "report-{}-to-{}.md",
+                                        self.export_start, self.export_end
+                                    );
+                                    if let Some(path) = rfd::FileDialog::new()
+                                        .set_title("Time Tracker — Export Report")
+                                        .set_file_name(&filename)
+                                        .add_filter("Markdown", &["md"])
+                                        .save_file()
+                                    {
+                                        if std::fs::write(&path, &md).is_ok() {
+                                            let _ = open::that(path);
+                                        }
+                                    }
+                                }
+                            } else {
+                                ui.add_enabled_ui(false, |ui| {
+                                    let _ = primary_button(ui, palette, "Download .md");
+                                });
+                            }
+                            if secondary_button(ui, palette, "Close").clicked() {
+                                self.show_export = false;
+                            }
+                        });
+                    });
                 });
             });
+        if !open {
+            self.show_export = false;
+        }
     }
 
     fn settings_modal(&mut self, ctx: &egui::Context, palette: Palette) {
-        paint_modal_backdrop(ctx, palette);
+        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("settings_modal_backdrop"));
+        if backdrop.clicked() {
+            self.show_settings = false;
+        }
+        let mut open = true;
         egui::Window::new("Settings")
+            .open(&mut open)
             .collapsible(false)
             .default_width(460.0)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 modal_content_frame().show(ui, |ui| {
                     ui.label(
@@ -1145,6 +1352,9 @@ impl WeeklyTrackerApp {
                     }
                 });
             });
+        if !open {
+            self.show_settings = false;
+        }
     }
 
     fn copy_modal(&mut self, ctx: &egui::Context, palette: Palette) {
@@ -1156,9 +1366,15 @@ impl WeeklyTrackerApp {
             .unwrap_or_default();
 
         let source_id = self.copy_source_id.clone();
-        paint_modal_backdrop(ctx, palette);
+        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("copy_modal_backdrop"));
+        if backdrop.clicked() {
+            self.copy_source_id = None;
+        }
+        let mut open = true;
         egui::Window::new("Copy to another day")
+            .open(&mut open)
             .collapsible(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 modal_content_frame().show(ui, |ui| {
                     ui.label(
@@ -1184,5 +1400,8 @@ impl WeeklyTrackerApp {
                     });
                 });
             });
+        if !open {
+            self.copy_source_id = None;
+        }
     }
 }

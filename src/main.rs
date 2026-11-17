@@ -8,10 +8,13 @@ mod storage;
 mod theme;
 mod updates;
 
+use crate::ui::chrome::{MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
+            .with_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
+            .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
             .with_title("Time Tracker"),
         ..Default::default()
     };

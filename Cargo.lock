@@ -3754,6 +3754,7 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
+ "epaint",
  "open",
  "rfd",
  "serde",

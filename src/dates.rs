@@ -65,7 +65,11 @@ pub struct MonthGrid {
 }
 
 pub fn get_month_grid(month_offset: i32) -> MonthGrid {
-    let base = today_local() + Months::new(month_offset as u32);
+    let base = if month_offset >= 0 {
+        today_local() + Months::new(month_offset as u32)
+    } else {
+        today_local() - Months::new(month_offset.unsigned_abs())
+    };
     let month_start = start_of_month(base);
     let month_end = end_of_month(base);
     let cal_start = start_of_week(month_start);
@@ -104,6 +108,33 @@ pub fn iso_weekday_labels() -> [&'static str; 7] {
 }
 
 /// Local wall-clock time for display on item cards (matches original `h:mm a`).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_grid_covers_month_in_full_weeks() {
+        for offset in -3..=3 {
+            let grid = get_month_grid(offset);
+            assert!(
+                (4..=6).contains(&grid.weeks.len()),
+                "offset {offset}: expected 4–6 weeks, got {}",
+                grid.weeks.len()
+            );
+            for (i, week) in grid.weeks.iter().enumerate() {
+                assert_eq!(week.days.len(), 7, "offset {offset} week {i}");
+            }
+            let month_start = start_of_month(grid.month);
+            let month_end = end_of_month(grid.month);
+            let all_days: Vec<NaiveDate> = grid.weeks.iter().flat_map(|w| w.days.clone()).collect();
+            assert!(all_days.contains(&month_start));
+            assert!(all_days.contains(&month_end));
+            assert_eq!(all_days.first().copied(), Some(start_of_week(month_start)));
+            assert_eq!(all_days.last().copied(), Some(end_of_week(month_end)));
+        }
+    }
+}
+
 pub fn format_local_time(iso: chrono::DateTime<Utc>) -> String {
     let local = iso.with_timezone(&Local);
     let hour = local.hour();
