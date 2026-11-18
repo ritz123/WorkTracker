@@ -32,18 +32,36 @@ pub const CAL_DAY_CELL_MIN_HEIGHT: f32 = 28.0;
 /// Minimum width of the left calendar pane in the main split.
 pub const CAL_COLUMN_MIN_WIDTH: f32 = 420.0;
 /// Minimum width reserved for the right day-detail / form pane.
-pub const DETAIL_COLUMN_MIN_WIDTH: f32 = 360.0;
+///
+/// The day-detail header is a single non-wrapping row. Its widest case is
+/// `Wednesday, May 10` (longest English weekday, widest `%b` abbreviation in
+/// Noto Sans Bold; digits are tabular so every two-digit day is the same width)
+/// plus the `Today` and `Pinned` pills, the 34px pin button, and `+ Add Item`.
+/// Laid out in Noto Sans Bold that row is 455.7px. [`detail_column_frame`] insets
+/// 20px on each side, so the pane is 496px (`ceil(455.7 + 40)`). At 495px the row
+/// is 0.7px wider than the content box and the pin button overlaps the `Pinned` pill.
+/// The edit-form footer (`Copy to another day…` + Cancel + Update) is narrower than this row.
+pub const DETAIL_COLUMN_MIN_WIDTH: f32 = 496.0;
 /// Calendar pane grows with the viewport up to 45% of total width so the detail list gets generous room.
 pub const MAIN_SPLIT_CAL_MAX_FRAC: f32 = 0.45;
-/// Smallest client width honoring [`CAL_COLUMN_MIN_WIDTH`] + [`DETAIL_COLUMN_MIN_WIDTH`] + divider.
+/// Smallest client width that keeps the calendar at [`CAL_COLUMN_MIN_WIDTH`] and the
+/// day-detail header inside [`DETAIL_COLUMN_MIN_WIDTH`], plus the 16px pane gap and the
+/// 1px divider between them.
+///
+/// The widest toolbar (`September 2026` + `Theme · Forest` + Import/Export/Close, about
+/// 773px) is inside this width. Extra window width grows the detail pane; the calendar
+/// stays at its 420px floor because [`calendar_column_width`] caps it at 45% of the row.
 pub const MIN_WINDOW_WIDTH: f32 =
     CAL_COLUMN_MIN_WIDTH + DETAIL_COLUMN_MIN_WIDTH + SPACE_MD + 1.0;
-/// Minimum client height fitting utility bar + compact hero + footer + six week rows at [`CAL_DAY_CELL_MIN_HEIGHT`].
-pub const MIN_WINDOW_HEIGHT: f32 = 480.0;
-/// Spacious default launch viewport width giving the Brand Hero Banner, Calendar, and Day Detail generous room.
-pub const DEFAULT_WINDOW_WIDTH: f32 = 1140.0;
-/// Spacious default launch viewport height fitting the full Brand Hero Banner + roomy 6-row Month Calendar.
-pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
+/// Shortest client height that keeps the full 86px hero and six day rows at the preferred
+/// [`CAL_DAY_CELL`] height (`48px`). One pixel shorter and the live layout drops the rows
+/// below that preferred height. This is both the launch size and the resize floor.
+pub const MIN_WINDOW_HEIGHT: f32 = 650.0;
+/// Launch width. Equal to [`MIN_WINDOW_WIDTH`]: wider windows only add empty space between
+/// the calendar and the day detail.
+pub const DEFAULT_WINDOW_WIDTH: f32 = MIN_WINDOW_WIDTH;
+/// Launch height. Equal to [`MIN_WINDOW_HEIGHT`].
+pub const DEFAULT_WINDOW_HEIGHT: f32 = MIN_WINDOW_HEIGHT;
 
 /// Standard height of the Brand Hero Card on desktop viewports (`>= 620px` window height).
 pub const HERO_HEIGHT: f32 = 86.0;
@@ -70,7 +88,7 @@ const DISABLED_ALPHA: f32 = 0.45;
 ///
 /// Protects the dual invariant that the calendar column never shrinks below
 /// [`CAL_COLUMN_MIN_WIDTH`] (`420px`, enough for `Wk` + 7 day columns) while never starving
-/// the right detail pane below [`DETAIL_COLUMN_MIN_WIDTH`] (`360px`).
+/// the right detail pane below [`DETAIL_COLUMN_MIN_WIDTH`].
 pub fn calendar_column_width(total_width: f32, pane_gap: f32) -> f32 {
     let divider = 1.0;
     let cal_cap = total_width * MAIN_SPLIT_CAL_MAX_FRAC;
@@ -85,7 +103,7 @@ pub fn calendar_column_width(total_width: f32, pane_gap: f32) -> f32 {
 /// Responsibility & invariants:
 /// - Shrinks cell height smoothly below `CAL_DAY_CELL.y` (`48px`) down to
 ///   [`CAL_DAY_CELL_MIN_HEIGHT`] (`28px`) so all 4–6 week rows remain simultaneously visible
-///   without vertical scrolling across standard desktop window heights (`>= 480px`).
+///   without vertical scrolling down to [`MIN_WINDOW_HEIGHT`].
 /// - Accounts for `frame_margin = SPACE_SM * 2.0` (`16px` total vertical inset) matching
 ///   [`calendar_outer_frame`] and [`cal_month_grid_content_height`] so layout budget and painted
 ///   content height agree to sub-pixel precision.
@@ -1763,7 +1781,7 @@ fn paint_hero_stat_pill(
 ///    controls so z-ordering is exact in a single pass.
 /// 3. Measures the laid-out left edge of the right-hand telemetry pills + `+ Log Today` CTA first
 ///    and clips the left-hand brand story strictly to `right_controls_left - gap`, guaranteeing
-///    zero text collision even down to [`MIN_WINDOW_WIDTH`] (`797px`).
+///    zero text collision even down to [`MIN_WINDOW_WIDTH`].
 pub fn paint_brand_hero_banner(
     ui: &mut Ui,
     palette: Palette,
@@ -2046,7 +2064,7 @@ mod tests {
             let p = Palette::for_theme(theme);
             for (compact, win_w, win_h, expected_h) in [
                 (false, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, HERO_HEIGHT),
-                (true, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, HERO_COMPACT_HEIGHT),
+                (true, MIN_WINDOW_WIDTH, 600.0, HERO_COMPACT_HEIGHT),
             ] {
                 let raw = egui::RawInput {
                     screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(win_w, win_h))),
@@ -2083,15 +2101,15 @@ mod tests {
         }
     }
 
-    /// Six-row months must fit without scrolling below both the standard Hero Banner (`760px`
-    /// default window) and the auto-compacted Hero Banner (`600px` and `480px` windows).
+    /// Six-row months must fit without scrolling at the launch size and in the shorter
+    /// compact-hero band the layout still knows how to draw.
     #[test]
     fn six_row_calendar_fits_below_hero_banner_from_default_down_to_short_windows() {
-        // Remaining scroll_h after toolbar (~46px), footer (~26px), hero band, and calendar card chrome (70px).
+        // Remaining scroll_h after toolbar, footer, hero band, and calendar card chrome (70px).
         for (win_h, hero_band_h, wrapper_pad_v) in [
             (DEFAULT_WINDOW_HEIGHT, HERO_HEIGHT + 21.0, 24.0),
             (600.0, HERO_COMPACT_HEIGHT + 17.0, 20.0),
-            (MIN_WINDOW_HEIGHT, HERO_COMPACT_HEIGHT + 13.0, 16.0),
+            (540.0, HERO_COMPACT_HEIGHT + 13.0, 16.0),
         ] {
             let split_h = win_h - 46.0 - 26.0 - hero_band_h;
             let inner_h = split_h - wrapper_pad_v;

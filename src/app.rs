@@ -39,7 +39,7 @@ use crate::ui::chrome::{
 use crate::ui::icons::{
     self, font_bold, icon_label, icon_label_bold, rich_bold, CALENDAR_BLANK, CARET_LEFT,
     CARET_RIGHT, CHECK_CIRCLE, COPY, DOWNLOAD, EXPORT, FILE_TEXT, FOLDER_OPEN, GEAR, PENCIL, PLUS,
-    PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH, UPLOAD_SIMPLE, WARNING_CIRCLE,
+    PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH, UPLOAD_SIMPLE, WARNING_CIRCLE, X,
 };
 use crate::updates::{self, UpdateCheckResult};
 
@@ -744,8 +744,12 @@ impl WeeklyTrackerApp {
     }
 
     /// Renders a calm, skippable ~1.0s architectural-neutral launch surface that fades cleanly
-    /// into the workspace without jarring full-screen gradients. Clicking anywhere or pressing
-    /// `Esc`, `Space`, or `Enter` dismisses it on the current frame.
+    /// into the workspace without jarring full-screen gradients. A click that does not turn into
+    /// a drag, or pressing `Esc`, `Space`, or `Enter`, dismisses it on the current frame.
+    ///
+    /// Dragging the splash moves the undecorated window. The OS frame is disabled in `main`, so
+    /// this overlay is the only surface on screen for the first second and must itself be a drag
+    /// handle. A drag is not treated as a dismiss click.
     fn splash_overlay(&mut self, ctx: &egui::Context, palette: Palette) {
         let screen = ctx.input(|i| i.screen_rect);
         let fade_start = StdDuration::from_millis(650);
@@ -761,8 +765,11 @@ impl WeeklyTrackerApp {
             .order(Order::Foreground)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
-                let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
-                if response.clicked() {
+                let (rect, response) =
+                    ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                } else if response.clicked() {
                     self.dismiss_splash(ctx);
                 }
                 let painter = ui.painter();
@@ -830,8 +837,77 @@ impl WeeklyTrackerApp {
     }
 }
 
+/// Restores edge resizing after the OS window frame is removed in `main`.
+///
+/// A 5px band inside each screen edge maps to [`egui::ResizeDirection`]. The band is narrower
+/// than the toolbar's 16px horizontal inset, so it does not cover Close, Import, or Export.
+/// On the press that starts inside the band, [`egui::ViewportCommand::BeginResize`] asks the
+/// window manager to run the resize grab. While the window is maximized there is no edge to
+/// drag, so the function returns without changing the cursor.
+///
+/// The cursor icon matches the edge so the pointer shows a resize arrow before the press.
+/// Without this, an undecorated X11 window has no frame grip and cannot be resized at all.
+fn undecorated_window_edges(ctx: &egui::Context) {
+    const BORDER: f32 = 5.0;
+    let (pointer, rect, maximized, pressed) = ctx.input(|input| {
+        (
+            input.pointer.interact_pos(),
+            input.screen_rect(),
+            input.viewport().maximized.unwrap_or(false),
+            input.pointer.primary_pressed(),
+        )
+    });
+    if maximized {
+        return;
+    }
+    let Some(pointer) = pointer else {
+        return;
+    };
+    if !rect.contains(pointer) {
+        return;
+    }
+
+    let west = pointer.x <= rect.left() + BORDER;
+    let east = pointer.x >= rect.right() - BORDER;
+    let north = pointer.y <= rect.top() + BORDER;
+    let south = pointer.y >= rect.bottom() - BORDER;
+    let direction = match (west, east, north, south) {
+        (true, _, true, _) => Some(egui::ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(egui::ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(egui::ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(egui::ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(egui::ResizeDirection::West),
+        (_, true, _, _) => Some(egui::ResizeDirection::East),
+        (_, _, true, _) => Some(egui::ResizeDirection::North),
+        (_, _, _, true) => Some(egui::ResizeDirection::South),
+        _ => None,
+    };
+    let Some(direction) = direction else {
+        return;
+    };
+
+    ctx.set_cursor_icon(match direction {
+        egui::ResizeDirection::North | egui::ResizeDirection::South => {
+            egui::CursorIcon::ResizeVertical
+        }
+        egui::ResizeDirection::East | egui::ResizeDirection::West => {
+            egui::CursorIcon::ResizeHorizontal
+        }
+        egui::ResizeDirection::NorthEast | egui::ResizeDirection::SouthWest => {
+            egui::CursorIcon::ResizeNeSw
+        }
+        egui::ResizeDirection::NorthWest | egui::ResizeDirection::SouthEast => {
+            egui::CursorIcon::ResizeNwSe
+        }
+    });
+    if pressed {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+    }
+}
+
 impl eframe::App for WeeklyTrackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        undecorated_window_edges(ctx);
         let palette = self.palette();
         self.poll_update_check();
         self.finish_splash_if_due(ctx);
@@ -1060,7 +1136,18 @@ impl WeeklyTrackerApp {
     /// dedicated to navigation and workspace controls (`< | Today | >` month scrubber, active
     /// `Month Year`, dual-tone Theme picker, Settings icon, and Export button) so it pairs cleanly
     /// with [`Self::brand_hero`] directly below without competing duplicate brand headers.
+    ///
+    /// The OS window frame is disabled, so this bar is the title-bar replacement. Empty space in
+    /// the bar (not the buttons) starts a window drag via [`egui::ViewportCommand::StartDrag`].
+    /// `Close` is the rightmost control and sends [`egui::ViewportCommand::Close`], which shuts
+    /// the process down the same way the removed title-bar button did.
     fn toolbar(&mut self, ui: &mut egui::Ui, palette: Palette) {
+        let drag = ui.interact(ui.max_rect(), ui.id().with("window_drag"), Sense::drag());
+        if drag.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
         let grid = get_month_grid(self.month_offset);
         let at_current_month = self.month_offset == 0 && self.pinned_date.is_none();
 
@@ -1109,6 +1196,9 @@ impl WeeklyTrackerApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_SM;
+                        if ghost_icon_button(ui, palette, X, 14.0, "Close").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
                         if secondary_button(
                             ui,
                             palette,
@@ -3208,6 +3298,198 @@ mod tests {
         assert_eq!(oct_metrics.month_achievements, 1);
     }
 
+    /// The launch window is the smallest size that still shows the full hero, six preferred-height
+    /// day rows, the widest toolbar (September + Theme · Forest), and the widest day-detail header
+    /// (`Wednesday, May 10` + Today + Pinned + pin + Add Item) without those controls overlapping.
+    ///
+    /// One pixel shorter than [`MIN_WINDOW_HEIGHT`] drops the day rows below [`CAL_DAY_CELL`].y.
+    /// [`DETAIL_COLUMN_MIN_WIDTH`] is the ceil of that header row plus the detail frame's 40px of
+    /// horizontal margin. One pixel narrower and the pin button overlaps the `Pinned` pill.
+    #[test]
+    fn launch_window_is_the_smallest_size_that_keeps_the_layout_intact() {
+        let ctx = egui::Context::default();
+        icons::install_fonts(&ctx);
+        let today = today_local();
+        let mut app = WeeklyTrackerApp {
+            items: Vec::new(),
+            month_offset: 0,
+            pinned_date: None,
+            hover_date: None,
+            theme: ThemeId::Default,
+            prefs: Prefs::default(),
+            show_import: false,
+            show_export: false,
+            show_settings: false,
+            settings_tab: SettingsTab::Storage,
+            import_mode: ImportMode::MergeSkipDuplicates,
+            import_file_name: None,
+            import_parsed: None,
+            import_banner: None,
+            form_mode: None,
+            form_item_id: None,
+            form_date: None,
+            form_title: String::new(),
+            form_description: String::new(),
+            form_category: "development".into(),
+            form_achievement: false,
+            export_start: format_date_key(start_of_month(today)),
+            export_end: format_date_key(end_of_month(today)),
+            copy_source_id: None,
+            copy_target_date: format_date_key(today + Duration::days(1)),
+            splash_active: false,
+            splash_started: Instant::now(),
+            update_rx: None,
+            update_poll_kind: None,
+            update_busy: false,
+            update_banner: None,
+            settings_update_notice: None,
+        };
+        apply_visuals(&ctx, app.theme);
+        let p = app.palette();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let left = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    Frame::new()
+                        .fill(p.surface_muted)
+                        .stroke(Stroke::new(1.0, p.border))
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(Margin::same(2))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let _ = scrubber_icon_button(ui, p, CARET_LEFT, "Previous month");
+                            let _ = scrubber_today_button(ui, p, true);
+                            let _ = scrubber_icon_button(ui, p, CARET_RIGHT, "Next month");
+                        });
+                    ui.add_space(SPACE_XS);
+                    ui.label(rich_bold("September 2026", 15.5).color(p.text));
+                    status_pill(ui, p.surface_muted, p.border, p.text_muted, "W47");
+                });
+                let right = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    let _ = ghost_icon_button(ui, p, X, 14.0, "Close");
+                    let _ = secondary_button(ui, p, icon_label(EXPORT, "Export", 13.0, p.text));
+                    let _ = secondary_button(ui, p, icon_label(UPLOAD_SIMPLE, "Import", 13.0, p.text));
+                    let _ = ghost_icon_button(ui, p, GEAR, 16.5, "Settings");
+                    vertical_divider(ui, 18.0, p.divider);
+                    let _ = theme_swatch_button(ui, p, ThemeId::Forest);
+                });
+                let needed = left.response.rect.width()
+                    + right.response.rect.width()
+                    + 32.0
+                    + SPACE_SM;
+                assert!(
+                    needed <= MIN_WINDOW_WIDTH,
+                    "widest toolbar needs {needed}px, window is {MIN_WINDOW_WIDTH}px"
+                );
+                assert_eq!(DEFAULT_WINDOW_WIDTH, MIN_WINDOW_WIDTH);
+                assert_eq!(DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_HEIGHT);
+
+                // Same spacing as `day_detail`: the outer row keeps the detail pane's 8px
+                // item spacing; the date/pills row and the button row set `SPACE_SM`.
+                let outer_gap = ui.spacing().item_spacing.x;
+                let date_row = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    ui.label(rich_bold("Wednesday, May 10", 18.0).color(p.text));
+                    status_pill(
+                        ui,
+                        p.accent_soft,
+                        p.accent_soft_border,
+                        p.accent_soft_fg,
+                        "Today",
+                    );
+                    status_pill(ui, p.surface_muted, p.border_strong, p.text_muted, "Pinned");
+                });
+                let actions = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    let _ = primary_button(
+                        ui,
+                        p,
+                        icon_label_bold(PLUS, "Add Item", 13.0, p.on_primary),
+                    );
+                    let _ = toggle_icon_button(ui, p, PUSH_PIN_SLASH, true, "Unpin day");
+                });
+                let header = date_row.response.rect.width()
+                    + outer_gap
+                    + actions.response.rect.width();
+                // `detail_column_frame` is Margin::symmetric(20, …): 40px of horizontal inset.
+                let needed_detail = (header + 40.0).ceil();
+                assert_eq!(
+                    DETAIL_COLUMN_MIN_WIDTH, needed_detail,
+                    "header row is {header}px (date {:.1} + actions {:.1}); pane floor must be {needed_detail}",
+                    date_row.response.rect.width(),
+                    actions.response.rect.width()
+                );
+
+                let copy_btn = ui.horizontal(|ui| {
+                    let _ = accent_ghost_button_enabled(ui, p, "Copy to another day…", true);
+                });
+                let form_actions = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    let _ = primary_button_enabled(ui, p, "Update", true);
+                    let _ = secondary_button(ui, p, "Cancel");
+                });
+                let form_row = copy_btn.response.rect.width()
+                    + outer_gap
+                    + form_actions.response.rect.width();
+                assert!(
+                    form_row <= header,
+                    "edit-form footer is {form_row}px, wider than the day header {header}px that sizes the pane"
+                );
+            });
+        });
+        for h in [DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_HEIGHT - 1.0] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, h))),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                let screen_h = h;
+                let compact_hero = screen_h < 620.0;
+                let ultra_short = screen_h < 540.0;
+                let hero_pad_v: i8 = if ultra_short { 6 } else if compact_hero { 8 } else { 10 };
+                let cal_pad_v: i8 = if ultra_short { 8 } else if compact_hero { 10 } else { 12 };
+                egui::TopBottomPanel::top("mt").frame(toolbar_panel_frame(p)).show(ctx, |ui| app.toolbar(ui, p));
+                egui::TopBottomPanel::bottom("mf").show(ctx, |ui| {
+                    horizontal_divider(ui, p.border);
+                    Frame::new().inner_margin(Margin::symmetric(SPACE_MD as i8, 5)).show(ui, |ui| {
+                        ui.label(RichText::new("footer").size(11.0));
+                    });
+                });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    Frame::new().inner_margin(Margin::symmetric(12, hero_pad_v)).show(ui, |ui| {
+                        app.brand_hero(ui, p, compact_hero);
+                    });
+                    horizontal_divider(ui, p.border);
+                    let split_h = ui.available_height();
+                    let inner_h = split_h - (cal_pad_v as f32) * 2.0;
+                    let scroll_h = inner_h - 70.0;
+                    let cell = cal_day_cell_for_layout(420.0, 6, scroll_h);
+                    let _ = (split_h, compact_hero);
+                    if (h - DEFAULT_WINDOW_HEIGHT).abs() < 0.5 {
+                        assert!(
+                            cell.y + 0.05 >= crate::ui::chrome::CAL_DAY_CELL.y,
+                            "launch height {h} lays out day rows at {:.2}px, below the preferred {}",
+                            cell.y,
+                            crate::ui::chrome::CAL_DAY_CELL.y
+                        );
+                    } else {
+                        assert!(
+                            cell.y < crate::ui::chrome::CAL_DAY_CELL.y,
+                            "height {h} still has full {:.2}px rows, so the window is taller than necessary",
+                            cell.y
+                        );
+                    }
+                });
+            });
+        }
+    }
+
     /// Exercises every major UI view (splash, toolbar, brand hero banner in both standard and
     /// compact viewport heights, calendar, empty & populated day detail, `+ Log Today` action,
     /// item form, export modal, settings tabs, and copy modal) across all six themes inside a
@@ -3281,7 +3563,7 @@ mod tests {
         app.cancel_form();
 
         // 2. Empty & populated Brand Hero + toolbar + calendar + day detail across all 6 themes
-        // at default (1140x760), compact-height (960x600), and minimum (797x480) viewports.
+        // at the launch size and at a 960×600 compact-height viewport.
         for theme in ThemeId::ALL {
             app.theme = theme;
             apply_visuals(&ctx, theme);
@@ -3290,7 +3572,6 @@ mod tests {
             for &(w, h, compact) in &[
                 (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, false),
                 (960.0, 600.0, true),
-                (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, true),
             ] {
                 let ultra_short = h < 540.0;
                 let hero_pad_v: i8 = if ultra_short {
