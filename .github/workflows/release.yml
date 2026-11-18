@@ -41,16 +41,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The tag is the release version. It has to be the same number as
-      # Cargo.toml, which is also the version the app reports at runtime.
-      - name: Require the tag to match Cargo.toml
+      # The pushed tag is the version bump. Stamp it into Cargo.toml before
+      # compiling so the binary reports that number, even when the tagged
+      # commit still has an older `version` field. Only vMAJOR.MINOR.PATCH
+      # is accepted; anything else would not compare cleanly in the update check.
+      - name: Stamp the tag version into the build
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "tag=$tag version=$ver"
-          test -n "$ver"
-          test "$tag" = "$ver"
+          echo "tag=$tag"
+          echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          awk -v ver="$tag" '
+            BEGIN { done = 0 }
+            /^version = / && !done {
+              print "version = \"" ver "\""
+              done = 1
+              next
+            }
+            { print }
+          ' Cargo.toml > Cargo.toml.stamped
+          grep -q "^version = \"$tag\"$" Cargo.toml.stamped
+          mv Cargo.toml.stamped Cargo.toml
+          grep -n '^version = ' Cargo.toml
 
       - name: Test
         run: cargo test --bin weekly_work_tracker
@@ -61,16 +73,17 @@ jobs:
       - name: Stage the binary
         shell: bash
         run: |
+          tag="${GITHUB_REF_NAME#v}"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/release/weekly_work_tracker.exe "${{ matrix.asset }}"
+            cp target/release/weekly_work_tracker.exe "WorkTracker-${tag}-windows.exe"
           else
-            cp target/release/weekly_work_tracker "${{ matrix.asset }}"
+            cp target/release/weekly_work_tracker "WorkTracker-${tag}-linux"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: ${{ matrix.name }}
+          path: WorkTracker-*
           if-no-files-found: error
 
   publish:
@@ -88,6 +101,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            dist/WorkTracker
-            dist/WorkTracker.exe
+          files: dist/*

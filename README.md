@@ -26,19 +26,14 @@ The Linux job installs the X11, Wayland, and GTK libraries that eframe links aga
 
 ## Versions and releases
 
-The version is the `version` field in `Cargo.toml`. The running app reports that same number, and the in-app update check compares it with the latest GitHub Release of this repository.
-
-To publish a release:
-
-1. Set `version` in `Cargo.toml` to the new number and commit that change on `main`.
-2. Tag that commit with `v` plus the same number, then push the tag.
+A release is a git tag of the form `vMAJOR.MINOR.PATCH`. Pushing that tag is the version bump. GitHub builds Linux and Windows binaries from the tagged commit, writes the tag into the version the app reports, and publishes a GitHub Release with both files attached.
 
 ```bash
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-`.github/workflows/release.yml` runs on that tag. It refuses the release if the tag and `Cargo.toml` disagree. When both platform builds pass, it opens a GitHub Release for the tag, writes the notes from the commits since the previous release, and attaches `WorkTracker` and `WorkTracker.exe`. Drafts and prereleases are not used, so the new release becomes the one the update check offers.
+The tag has to point at a commit that contains `.github/workflows/release.yml`. The workflow accepts only a three-part numeric tag, so `v0.2.0` publishes and `v0.2` does not. The release notes are the commits since the previous release. The attached files are `WorkTracker-0.2.0-linux` and `WorkTracker-0.2.0-windows.exe`. The in-app update check reads the latest release of this repository and offers it when its tag is newer than the running build.
 
 Data is stored under `~/.weekly-tracker/` (same `data.json` / `prefs.json` shape as the original). You can also import exported `.md` reports at any time via **Import** in the top bar (or **Settings → Storage**), choosing either **Merge (skip duplicates)** or **Replace date range**, and export reports to `.md` or vector `.pdf`.
 
