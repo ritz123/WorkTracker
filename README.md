@@ -29,9 +29,10 @@ The Linux job installs the X11, Wayland, and GTK libraries that eframe links aga
 A release is a git tag of the form `vMAJOR.MINOR.PATCH`. Pushing that tag is the version bump. The app reports that tag: `build.rs` reads it at compile time and strips the leading `v`. A build with no tag falls back to `version` in `Cargo.toml`. GitHub passes the pushed tag into the release build, so the published binaries report that version, then publishes a GitHub Release with both files attached.
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+./release.sh 0.2.0
 ```
+
+`release.sh` writes that number into `Cargo.toml` and `Cargo.lock`, commits the change when the version actually moved, tags the commit `v0.2.0`, and pushes the branch and the tag. The working tree must be clean.
 
 The tag has to point at a commit that contains `.github/workflows/release.yml`. The workflow accepts only a three-part numeric tag, so `v0.2.0` publishes and `v0.2` does not. The release notes are the commits since the previous release. The attached files are `WorkTracker-0.2.0-linux` and `WorkTracker-0.2.0-windows.exe`. The in-app update check reads the latest release of this repository and offers it when its tag is newer than the running build.
 
