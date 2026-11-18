@@ -3,7 +3,7 @@ name = "weekly_work_tracker"
 version = "0.1.0"
 edition = "2021"
 description = "Desktop work-item tracker (Rust port of Time Tracker)"
-license = "GPL-2.0-only"
+license = "GPL-3.0-only"
 authors = ["Biplab Sarkar <sarkarbiplab@gmail.com>"]
 
 [dependencies]

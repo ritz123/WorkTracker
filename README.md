@@ -1,6 +1,6 @@
 # Work Tracker (Rust)
 
-Native desktop port of [TimeTracker-master](./TimeTracker-master/) using **eframe/egui**, with UI tokens from **ui-ux-pro-max** (see [design-system/weekly-work-tracker/MASTER.md](./design-system/weekly-work-tracker/MASTER.md)).
+Native desktop port of the Electron [Time Tracker](https://github.com/ritz123/TimeTracker) app using **eframe/egui**, with UI tokens from **ui-ux-pro-max** (see [design-system/weekly-work-tracker/MASTER.md](./design-system/weekly-work-tracker/MASTER.md)).
 
 ## Feature list
 

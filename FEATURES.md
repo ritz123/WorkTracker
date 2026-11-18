@@ -1,6 +1,6 @@
-# Time Tracker — supported features (from TimeTracker-master)
+# Time Tracker — supported features (from the Electron app)
 
-Reference implementation: Electron + React app in `TimeTracker-master/`.
+Reference implementation: the Electron + React app at [ritz123/TimeTracker](https://github.com/ritz123/TimeTracker).
 
 ## Work items
 

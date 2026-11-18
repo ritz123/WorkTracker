@@ -55,4 +55,4 @@ pub const APP_TAGLINE: &str = "Track your work. Celebrate your wins.";
 pub const APP_REPO_URL: &str = "https://github.com/ritz123/WorkTracker";
 pub const APP_RELEASES_URL: &str = "https://github.com/ritz123/WorkTracker/releases";
 pub const APP_CONTACT_EMAIL: &str = "sarkarbiplab@gmail.com";
-pub const APP_LICENSE: &str = "GNU General Public License v2.0 (GPLv2)";
+pub const APP_LICENSE: &str = "GNU General Public License v3.0 (GPLv3)";
