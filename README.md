@@ -13,6 +13,10 @@ cargo build --release
 cargo run
 ```
 
+## Windows build
+
+GitHub Actions builds a Windows executable on every push to `main` (`.github/workflows/windows.yml`). After a run finishes, download `WorkTracker.exe` from that run's **Artifacts**. You can also start a build from the Actions tab with **Run workflow**.
+
 Data is stored under `~/.weekly-tracker/` (same `data.json` / `prefs.json` shape as the original). You can also import exported `.md` reports at any time via **Import** in the top bar (or **Settings → Storage**), choosing either **Merge (skip duplicates)** or **Replace date range**, and export reports to `.md` or vector `.pdf`.
 
 ## License

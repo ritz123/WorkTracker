@@ -1,0 +1,32 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --bin weekly_work_tracker
+
+      - name: Release build
+        run: cargo build --release --bin weekly_work_tracker
+
+      - name: Name the executable
+        run: copy target\release\weekly_work_tracker.exe WorkTracker.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WorkTracker-windows
+          path: WorkTracker.exe
+          if-no-files-found: error
