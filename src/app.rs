@@ -15,11 +15,12 @@ use crate::dates::{
     iso_weekday_labels, items_for_day, month_offset_for_date, parse_date_key, start_of_month,
     start_of_week, today_local,
 };
-use crate::markdown::generate_markdown_for_range;
+use crate::markdown::{generate_markdown_for_range, parse_markdown_report, ParsedMarkdownReport};
 use crate::models::{
     APP_CONTACT_EMAIL, APP_LICENSE, APP_NAME, APP_REPO_URL, APP_RELEASES_URL, APP_TAGLINE,
     APP_VERSION, Prefs, WorkItem,
 };
+use crate::pdf::{generate_pdf_for_range, range_report_stats};
 use crate::storage::{load_items, load_prefs, save_items, save_prefs, storage_dir_display};
 use crate::theme::{apply_visuals, Palette, ThemeId};
 use crate::ui::chrome::{
@@ -30,15 +31,15 @@ use crate::ui::chrome::{
     modal_window_frame, paint_brand_hero_banner, paint_modal_backdrop, paint_week_column_cell,
     preset_button, primary_button, primary_button_compact, primary_button_enabled,
     scrubber_icon_button, scrubber_today_button, secondary_button, settings_tab_button,
-    soft_accent_button, status_pill, styled_multiline_input, styled_singleline_input,
-    theme_menu_row, theme_swatch_button, toggle_icon_button, toolbar_panel_frame, vertical_divider,
-    HeroContent, CAL_WEEK_COL_WIDTH, CARD_RADIUS, DETAIL_COLUMN_MIN_WIDTH, SPACE_LG, SPACE_MD,
-    SPACE_SM, SPACE_XS,
+    soft_accent_button, soft_accent_button_enabled, status_pill, styled_multiline_input,
+    styled_singleline_input, theme_menu_row, theme_swatch_button, toggle_icon_button,
+    toolbar_panel_frame, vertical_divider, HeroContent, CAL_WEEK_COL_WIDTH, CARD_RADIUS,
+    DETAIL_COLUMN_MIN_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
 };
 use crate::ui::icons::{
     self, font_bold, icon_label, icon_label_bold, rich_bold, CALENDAR_BLANK, CARET_LEFT,
-    CARET_RIGHT, COPY, DOWNLOAD, EXPORT, GEAR, PENCIL, PLUS, PUSH_PIN, PUSH_PIN_SLASH, TIMER,
-    TRASH,
+    CARET_RIGHT, CHECK_CIRCLE, COPY, DOWNLOAD, EXPORT, FILE_TEXT, FOLDER_OPEN, GEAR, PENCIL, PLUS,
+    PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH, UPLOAD_SIMPLE, WARNING_CIRCLE,
 };
 use crate::updates::{self, UpdateCheckResult};
 
@@ -53,6 +54,240 @@ enum SettingsTab {
 enum FormMode {
     Add,
     Edit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMode {
+    MergeSkipDuplicates,
+    ReplaceDateRange,
+}
+
+#[derive(Debug, Clone)]
+struct ImportPlan {
+    /// Per-item flag aligned 1:1 with `report.items`: `true` if `MergeSkipDuplicates` skips it.
+    duplicate_flags: Vec<bool>,
+    duplicate_count: usize,
+    new_merge_count: usize,
+    achievements_count: usize,
+    replace_range: Option<(chrono::NaiveDate, chrono::NaiveDate)>,
+    existing_in_replace_range: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImportOutcome {
+    imported_count: usize,
+    latest_date: Option<chrono::NaiveDate>,
+}
+
+fn import_dedup_key(item: &WorkItem) -> (String, String, String) {
+    (
+        item.date.trim().to_string(),
+        item.title.trim().to_lowercase(),
+        item.category.trim().to_lowercase(),
+    )
+}
+
+/// Computes preview telemetry and per-item duplicate flags for `report` against `existing_items`.
+///
+/// Responsibility & invariants:
+/// - Defines duplicate identity in [`ImportMode::MergeSkipDuplicates`] as matching `(date,
+///   trimmed lowercase title, lowercase category)`, tracking seen keys across both `existing_items`
+///   and earlier entries inside `report.items` so intra-file duplicates are also surfaced cleanly.
+/// - Computes `replace_range` from `report.start_date..=report.end_date` (falling back to the min
+///   and max item dates when needed) and counts how many `existing_items` lie inside that window so
+///   [`ImportMode::ReplaceDateRange`] discloses its exact blast radius before confirmation.
+fn compute_import_plan(existing_items: &[WorkItem], report: &ParsedMarkdownReport) -> ImportPlan {
+    let mut seen: std::collections::HashSet<(String, String, String)> =
+        existing_items.iter().map(import_dedup_key).collect();
+
+    let mut duplicate_flags = Vec::with_capacity(report.items.len());
+    let mut duplicate_count = 0;
+    let mut achievements_count = 0;
+
+    let mut min_item_date: Option<chrono::NaiveDate> = None;
+    let mut max_item_date: Option<chrono::NaiveDate> = None;
+
+    for item in &report.items {
+        if item.is_achievement {
+            achievements_count += 1;
+        }
+        if let Some(d) = parse_date_key(&item.date) {
+            min_item_date = Some(min_item_date.map_or(d, |prev| prev.min(d)));
+            max_item_date = Some(max_item_date.map_or(d, |prev| prev.max(d)));
+        }
+        let is_dup = !seen.insert(import_dedup_key(item));
+        if is_dup {
+            duplicate_count += 1;
+        }
+        duplicate_flags.push(is_dup);
+    }
+
+    let replace_range = match (report.start_date.or(min_item_date), report.end_date.or(max_item_date))
+    {
+        (Some(s), Some(e)) if s <= e => Some((s, e)),
+        _ => None,
+    };
+
+    let existing_in_replace_range = match replace_range {
+        Some((start, end)) => existing_items
+            .iter()
+            .filter(|i| parse_date_key(&i.date).is_some_and(|d| d >= start && d <= end))
+            .count(),
+        None => 0,
+    };
+
+    let new_merge_count = report.items.len().saturating_sub(duplicate_count);
+
+    ImportPlan {
+        duplicate_flags,
+        duplicate_count,
+        new_merge_count,
+        achievements_count,
+        replace_range,
+        existing_in_replace_range,
+    }
+}
+
+/// Applies `report` onto `items` according to `mode` and returns the count of imported items plus
+/// the most recent imported [`chrono::NaiveDate`] so the UI can jump directly to it.
+///
+/// Invariants:
+/// - In [`ImportMode::MergeSkipDuplicates`], existing items are never mutated or removed; only
+///   items whose `(date, lowercase trimmed title, lowercase category)` is not yet present are
+///   appended.
+/// - In [`ImportMode::ReplaceDateRange`], if `report.items` is empty this function is a safe no-op
+///   (protecting against accidental range wipes from empty reports); otherwise only existing items
+///   with valid dates inside `replace_range` are replaced while all dates outside the range stay
+///   untouched.
+fn apply_markdown_import(
+    items: &mut Vec<WorkItem>,
+    report: &ParsedMarkdownReport,
+    mode: ImportMode,
+) -> ImportOutcome {
+    let plan = compute_import_plan(items, report);
+    let mut latest_date: Option<chrono::NaiveDate> = None;
+    let mut imported_count = 0;
+
+    match mode {
+        ImportMode::MergeSkipDuplicates => {
+            for (item, &is_dup) in report.items.iter().zip(plan.duplicate_flags.iter()) {
+                if is_dup {
+                    continue;
+                }
+                if let Some(d) = parse_date_key(&item.date) {
+                    latest_date = Some(latest_date.map_or(d, |prev| prev.max(d)));
+                }
+                items.push(item.clone());
+                imported_count += 1;
+            }
+        }
+        ImportMode::ReplaceDateRange => {
+            if report.items.is_empty() {
+                return ImportOutcome {
+                    imported_count: 0,
+                    latest_date: None,
+                };
+            }
+            if let Some((start, end)) = plan.replace_range {
+                items.retain(|existing| {
+                    parse_date_key(&existing.date).is_none_or(|d| d < start || d > end)
+                });
+            }
+            for item in &report.items {
+                if let Some(d) = parse_date_key(&item.date) {
+                    latest_date = Some(latest_date.map_or(d, |prev| prev.max(d)));
+                }
+                items.push(item.clone());
+                imported_count += 1;
+            }
+        }
+    }
+
+    ImportOutcome {
+        imported_count,
+        latest_date,
+    }
+}
+
+/// Blocking open/save dialog for Markdown import and PDF/Markdown export.
+///
+/// `save_name` is the suggested file name for a save dialog. `None` opens an existing file.
+/// Cancel, an empty selection, and a missing dialog binary all return `None` so the caller
+/// leaves the workspace unchanged.
+///
+/// Linux must not call `rfd::FileDialog`. rfd 0.15's default backend sends the request to the
+/// XDG desktop portal through ashpd and zbus 5.19. On this XFCE session that segfaults the
+/// process: the `zbus::Connection` thread dies with `SIGSEGV` inside
+/// `PropertiesCache::update_cache` while iterating `invalidated_properties`
+/// (`IntoIterator for &[T]`). The UI thread is blocked in `pollster::block_on` waiting for
+/// the portal, so rfd's zenity fallback — which runs only after the portal returns `Err` —
+/// never executes. A fatal signal is not that `Err`. Zenity is a child process; its cancel
+/// or crash cannot take this process down. Other platforms keep `rfd`'s native dialog.
+fn choose_report_file(
+    title: &str,
+    filter_name: &str,
+    extensions: &[&str],
+    save_name: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = report_file_dialog_command(title, filter_name, extensions, save_name);
+        match cmd.output() {
+            Ok(output) => {
+                let Ok(text) = String::from_utf8(output.stdout) else {
+                    return None;
+                };
+                let path = text.trim();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(path))
+                }
+            }
+            Err(err) => {
+                eprintln!("file dialog failed ({title}): {err}");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title(title)
+            .add_filter(filter_name, extensions);
+        if let Some(name) = save_name {
+            dialog = dialog.set_file_name(name);
+            dialog.save_file()
+        } else {
+            dialog.pick_file()
+        }
+    }
+}
+
+/// Builds the Linux zenity invocation used by [`choose_report_file`].
+///
+/// Separated from process execution so tests can assert the dialog never goes through the
+/// XDG portal. `--no-markup` keeps titles with `&` or `<` from being parsed as Pango.
+/// `--confirm-overwrite` is save-only: an open dialog must not prompt to replace a file
+/// the user is only selecting.
+#[cfg(target_os = "linux")]
+fn report_file_dialog_command(
+    title: &str,
+    filter_name: &str,
+    extensions: &[&str],
+    save_name: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("zenity");
+    cmd.arg("--no-markup");
+    cmd.arg("--file-selection");
+    cmd.args(["--title", title]);
+    if let Some(name) = save_name {
+        cmd.args(["--save", "--confirm-overwrite", "--filename", name]);
+    }
+    let patterns: Vec<String> = extensions.iter().map(|ext| format!("*.{ext}")).collect();
+    cmd.arg("--file-filter");
+    cmd.arg(format!("{filter_name} | {}", patterns.join(" ")));
+    cmd
 }
 
 #[derive(Clone)]
@@ -127,9 +362,15 @@ pub struct WeeklyTrackerApp {
     hover_date: Option<chrono::NaiveDate>,
     theme: ThemeId,
     prefs: Prefs,
+    show_import: bool,
     show_export: bool,
     show_settings: bool,
     settings_tab: SettingsTab,
+
+    import_mode: ImportMode,
+    import_file_name: Option<String>,
+    import_parsed: Option<Result<ParsedMarkdownReport, String>>,
+    import_banner: Option<String>,
 
     form_mode: Option<FormMode>,
     form_item_id: Option<String>,
@@ -174,9 +415,14 @@ impl WeeklyTrackerApp {
             hover_date: None,
             theme,
             prefs,
+            show_import: false,
             show_export: false,
             show_settings: false,
             settings_tab: SettingsTab::Storage,
+            import_mode: ImportMode::MergeSkipDuplicates,
+            import_file_name: None,
+            import_parsed: None,
+            import_banner: None,
             form_mode: None,
             form_item_id: None,
             form_date: None,
@@ -326,6 +572,49 @@ impl WeeklyTrackerApp {
         }
         self.copy_source_id = None;
         self.persist_items();
+    }
+
+    fn open_import_modal(&mut self) {
+        self.show_import = true;
+        self.import_mode = ImportMode::MergeSkipDuplicates;
+        self.import_file_name = None;
+        self.import_parsed = None;
+    }
+
+    fn load_import_markdown_content(&mut self, file_name: String, content: Result<String, String>) {
+        self.import_file_name = Some(file_name);
+        self.import_parsed = Some(content.and_then(|raw| parse_markdown_report(&raw)));
+    }
+
+    fn confirm_markdown_import(&mut self) {
+        let Some(Ok(report)) = self.import_parsed.clone() else {
+            return;
+        };
+        let outcome = apply_markdown_import(&mut self.items, &report, self.import_mode);
+        if outcome.imported_count == 0 {
+            return;
+        }
+        self.persist_items();
+        if let Some(latest) = outcome.latest_date {
+            self.month_offset = month_offset_for_date(latest);
+            self.pinned_date = Some(latest);
+        }
+        let item_word = if outcome.imported_count == 1 {
+            "item"
+        } else {
+            "items"
+        };
+        let source = self
+            .import_file_name
+            .as_deref()
+            .unwrap_or("Markdown report");
+        self.import_banner = Some(format!(
+            "Imported {} work {item_word} from {source}",
+            outcome.imported_count
+        ));
+        self.show_import = false;
+        self.import_file_name = None;
+        self.import_parsed = None;
     }
 
     fn item_counts(&self) -> std::collections::HashMap<String, usize> {
@@ -558,6 +847,8 @@ impl eframe::App for WeeklyTrackerApp {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.copy_source_id.is_some() {
                 self.copy_source_id = None;
+            } else if self.show_import {
+                self.show_import = false;
             } else if self.show_export {
                 self.show_export = false;
             } else if self.show_settings {
@@ -565,6 +856,33 @@ impl eframe::App for WeeklyTrackerApp {
             } else if self.form_mode.is_some() {
                 self.cancel_form();
             }
+        }
+
+        if let Some(msg) = self.import_banner.clone() {
+            egui::TopBottomPanel::top("import_banner")
+                .frame(
+                    Frame::new()
+                        .fill(palette.accent_soft)
+                        .inner_margin(Margin::symmetric(SPACE_MD as i8, 6))
+                        .stroke(Stroke::NONE),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            icon_label_bold(CHECK_CIRCLE, &msg, 12.5, palette.accent_soft_fg),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ghost_button_compact(ui, palette, "Dismiss").clicked() {
+                                self.import_banner = None;
+                            }
+                        });
+                    });
+                });
+            egui::TopBottomPanel::top("import_banner_divider")
+                .frame(Frame::new().fill(palette.accent_soft_border).inner_margin(Margin::ZERO))
+                .exact_height(1.0)
+                .show(ctx, |_ui| {});
         }
 
         if let Some(banner) = self.update_banner.clone() {
@@ -722,6 +1040,9 @@ impl eframe::App for WeeklyTrackerApp {
                 });
             });
 
+        if self.show_import {
+            self.import_modal(ctx, palette);
+        }
         if self.show_export {
             self.export_modal(ctx, palette);
         }
@@ -793,10 +1114,21 @@ impl WeeklyTrackerApp {
                             palette,
                             icon_label(EXPORT, "Export", 13.0, palette.text),
                         )
-                        .on_hover_text("Export markdown report")
+                        .on_hover_text("Export PDF or Markdown report")
                         .clicked()
                         {
                             self.show_export = true;
+                        }
+
+                        if secondary_button(
+                            ui,
+                            palette,
+                            icon_label(UPLOAD_SIMPLE, "Import", 13.0, palette.text),
+                        )
+                        .on_hover_text("Import work items from an exported Markdown (.md) report")
+                        .clicked()
+                        {
+                            self.open_import_modal();
                         }
 
                         if ghost_icon_button(ui, palette, GEAR, 16.5, "Settings").clicked() {
@@ -1588,8 +1920,16 @@ impl WeeklyTrackerApp {
         });
     }
 
-    /// Renders the frameless Markdown Export modal (`Export Report`) with scrim/Esc/X dismissal,
-    /// active-highlighted date range presets, live monospace Markdown preview, and `.md` save dialog.
+    /// Renders the frameless Export modal (`Export Report`) with scrim/Esc/X dismissal,
+    /// active-highlighted date range presets, a live active-day telemetry strip, monospace
+    /// Markdown preview, and both `.md` and active-days-only `.pdf` save dialogs.
+    ///
+    /// Responsibility & invariants:
+    /// - Reuses [`range_report_stats`] for the modal's summary strip so the reported item and
+    ///   active-day counts match [`generate_pdf_for_range`] identically, making clear before
+    ///   saving that PDF output omits dates with zero saved entries.
+    /// - Disables both `Download .md` and `Download PDF` identically whenever `export_start` or
+    ///   `export_end` fails `YYYY-MM-DD` parsing or `start > end`.
     fn export_modal(&mut self, ctx: &egui::Context, palette: Palette) {
         let backdrop = paint_modal_backdrop(ctx, palette, egui::Id::new("export_modal_backdrop"));
         if backdrop.clicked() {
@@ -1634,7 +1974,7 @@ impl WeeklyTrackerApp {
                     ui,
                     palette,
                     "Export Report",
-                    Some("Generate a clean Markdown summary for standups or status updates"),
+                    Some("Download a studio-grade PDF (active days only) or Markdown summary"),
                 ) {
                     close_requested = true;
                 }
@@ -1699,10 +2039,36 @@ impl WeeklyTrackerApp {
                             _ => None,
                         };
 
-                        if range.is_none()
-                            && !self.export_start.is_empty()
-                            && !self.export_end.is_empty()
-                        {
+                        if let Some((start, end)) = range {
+                            let stats = range_report_stats(&self.items, start, end);
+                            let item_word = if stats.total_items == 1 {
+                                "item"
+                            } else {
+                                "items"
+                            };
+                            let day_word = if stats.active_days == 1 {
+                                "day"
+                            } else {
+                                "days"
+                            };
+                            ui.add_space(10.0);
+                            Frame::new()
+                                .fill(palette.surface_muted)
+                                .stroke(Stroke::new(1.0, palette.border))
+                                .corner_radius(CornerRadius::same(7))
+                                .inner_margin(Margin::symmetric(10, 6))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} {item_word} across {} active {day_word} · PDF omits empty days",
+                                            stats.total_items, stats.active_days
+                                        ))
+                                        .size(12.0)
+                                        .color(palette.text_muted),
+                                    );
+                                });
+                        } else if !self.export_start.is_empty() && !self.export_end.is_empty() {
                             ui.add_space(SPACE_SM);
                             ui.label(
                                 RichText::new(
@@ -1768,30 +2134,63 @@ impl WeeklyTrackerApp {
                             ui.set_width(ui.available_width());
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                let dl_label =
-                                    icon_label_bold(DOWNLOAD, "Download .md", 13.0, palette.on_primary);
-                                if let Some((start, end)) = range {
-                                    if primary_button(ui, palette, dl_label).clicked() {
+                                let valid = range.is_some();
+
+                                let pdf_label = icon_label_bold(
+                                    DOWNLOAD,
+                                    "Download PDF",
+                                    13.0,
+                                    palette.on_primary,
+                                );
+                                if primary_button_enabled(ui, palette, pdf_label, valid).clicked() {
+                                    if let Some((start, end)) = range {
+                                        let pdf = generate_pdf_for_range(&self.items, start, end);
+                                        let filename = format!(
+                                            "report-{}-to-{}.pdf",
+                                            self.export_start, self.export_end
+                                        );
+                                        if let Some(path) = choose_report_file(
+                                            "Time Tracker — Export PDF Report",
+                                            "PDF",
+                                            &["pdf"],
+                                            Some(&filename),
+                                        ) {
+                                            if std::fs::write(&path, &pdf).is_ok() {
+                                                let _ = open::that(path);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let md_label = icon_label_bold(
+                                    DOWNLOAD,
+                                    "Download .md",
+                                    13.0,
+                                    palette.accent_soft_fg,
+                                );
+                                if soft_accent_button_enabled(ui, palette, md_label, valid)
+                                    .clicked()
+                                {
+                                    if let Some((start, end)) = range {
                                         let md =
                                             generate_markdown_for_range(&self.items, start, end);
                                         let filename = format!(
                                             "report-{}-to-{}.md",
                                             self.export_start, self.export_end
                                         );
-                                        if let Some(path) = rfd::FileDialog::new()
-                                            .set_title("Time Tracker — Export Report")
-                                            .set_file_name(&filename)
-                                            .add_filter("Markdown", &["md"])
-                                            .save_file()
-                                        {
+                                        if let Some(path) = choose_report_file(
+                                            "Time Tracker — Export Report",
+                                            "Markdown",
+                                            &["md"],
+                                            Some(&filename),
+                                        ) {
                                             if std::fs::write(&path, &md).is_ok() {
                                                 let _ = open::that(path);
                                             }
                                         }
                                     }
-                                } else {
-                                    let _ = primary_button_enabled(ui, palette, dl_label, false);
                                 }
+
                                 if secondary_button(ui, palette, "Close").clicked() {
                                     close_requested = true;
                                 }
@@ -1802,6 +2201,529 @@ impl WeeklyTrackerApp {
 
         if close_requested {
             self.show_export = false;
+        }
+    }
+
+    /// Renders the frameless `Import Markdown Report` modal (`import_markdown_modal`) with
+    /// scrim/Esc/X dismissal, instant file-load validation, summary telemetry strip, segmented
+    /// `Merge (skip duplicates) | Replace date range` mode selector, scrollable item preview, and
+    /// explicit disabled CTA clarity when zero importable items are ready.
+    ///
+    /// Flow & invariants:
+    /// - Validates `.md` files immediately on selection via [`parse_markdown_report`] rather than
+    ///   waiting until submit, displaying either a clear error callout or a rich item-by-item
+    ///   preview with duplicate badges.
+    /// - Disables `Import <N> Items` whenever no file is loaded, parsing failed, or `N == 0`
+    ///   (either all parsed entries already exist in Merge mode or the report contained zero work
+    ///   items), preventing empty or duplicate-only commits.
+    /// - Upon confirmation, persists `self.items`, jumps `month_offset` and `pinned_date` to the
+    ///   most recent imported date, closes the modal, and surfaces `self.import_banner`.
+    fn import_modal(&mut self, ctx: &egui::Context, palette: Palette) {
+        let backdrop = paint_modal_backdrop(ctx, palette, egui::Id::new("import_modal_backdrop"));
+        if backdrop.clicked() {
+            self.show_import = false;
+            return;
+        }
+
+        let plan_opt = match &self.import_parsed {
+            Some(Ok(report)) => Some(compute_import_plan(&self.items, report)),
+            _ => None,
+        };
+
+        let mut close_requested = false;
+        let mut trigger_import = false;
+        let mut pick_file_clicked = false;
+
+        egui::Window::new("import_markdown_modal")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([560.0, 0.0])
+            .frame(modal_window_frame(palette))
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if modal_header(
+                    ui,
+                    palette,
+                    "Import Markdown Report",
+                    Some("Load work items from an exported Time Tracker .md report"),
+                ) {
+                    close_requested = true;
+                }
+
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        // 1. File Picker Bar
+                        Frame::new()
+                            .fill(palette.surface_muted)
+                            .stroke(Stroke::new(1.0, palette.border))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::symmetric(12, 10))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+
+                                    ui.label(
+                                        RichText::new(FILE_TEXT)
+                                            .size(18.0)
+                                            .color(if self.import_file_name.is_some() {
+                                                palette.primary
+                                            } else {
+                                                palette.text_muted
+                                            }),
+                                    );
+
+                                    let btn_reserve = 162.0;
+                                    let text_w = (ui.available_width() - btn_reserve).max(120.0);
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(text_w, 0.0),
+                                        Layout::top_down(Align::LEFT),
+                                        |ui| {
+                                            if let Some(name) = &self.import_file_name {
+                                                ui.label(
+                                                    rich_bold(name, 13.0).color(palette.text),
+                                                );
+                                                if let Some(Ok(report)) = &self.import_parsed {
+                                                    if let (Some(s), Some(e)) =
+                                                        (report.start_date, report.end_date)
+                                                    {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "Range: {} to {}",
+                                                                format_date_key(s),
+                                                                format_date_key(e)
+                                                            ))
+                                                            .size(11.5)
+                                                            .color(palette.text_muted),
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                ui.label(
+                                                    rich_bold("No file selected", 13.0)
+                                                        .color(palette.text_muted),
+                                                );
+                                                ui.label(
+                                                    RichText::new(
+                                                        "Choose an exported .md or .markdown file",
+                                                    )
+                                                    .size(11.5)
+                                                    .color(palette.text_faint),
+                                                );
+                                            }
+                                        },
+                                    );
+
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if secondary_button(
+                                            ui,
+                                            palette,
+                                            icon_label(
+                                                FOLDER_OPEN,
+                                                "Choose .md File…",
+                                                13.0,
+                                                palette.text,
+                                            ),
+                                        )
+                                        .clicked()
+                                        {
+                                            pick_file_clicked = true;
+                                        }
+                                    });
+                                });
+                            });
+
+                        ui.add_space(SPACE_MD);
+
+                        // 2. Empty Prompt / Parse Error / Parsed Preview State
+                        match (&self.import_parsed, &plan_opt) {
+                            (None, _) => {
+                                Frame::new()
+                                    .fill(palette.background)
+                                    .stroke(Stroke::new(1.0, palette.border))
+                                    .corner_radius(CornerRadius::same(10))
+                                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 22))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.vertical_centered(|ui| {
+                                            let (icon_rect, _) = ui.allocate_exact_size(
+                                                Vec2::splat(40.0),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                icon_rect,
+                                                CornerRadius::same(10),
+                                                palette.surface,
+                                            );
+                                            ui.painter().rect_stroke(
+                                                icon_rect,
+                                                CornerRadius::same(10),
+                                                Stroke::new(1.0, palette.border),
+                                                StrokeKind::Inside,
+                                            );
+                                            ui.painter().text(
+                                                icon_rect.center(),
+                                                Align2::CENTER_CENTER,
+                                                UPLOAD_SIMPLE,
+                                                FontId::new(19.0, FontFamily::Proportional),
+                                                palette.text_muted,
+                                            );
+                                            ui.add_space(10.0);
+                                            ui.label(
+                                                rich_bold(
+                                                    "Select a Time Tracker Markdown report",
+                                                    13.5,
+                                                )
+                                                .color(palette.text),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new(
+                                                    "Parses day sections, categories, descriptions, and starred achievements with duplicate detection before saving.",
+                                                )
+                                                .size(12.0)
+                                                .color(palette.text_muted),
+                                            );
+                                        });
+                                    });
+                            }
+                            (Some(Err(err_msg)), _) => {
+                                Frame::new()
+                                    .fill(palette.danger_hover_bg)
+                                    .stroke(Stroke::new(
+                                        1.0,
+                                        palette.danger_fg.gamma_multiply(0.45),
+                                    ))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(Margin::symmetric(14, 12))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            ui.label(
+                                                RichText::new(WARNING_CIRCLE)
+                                                    .size(16.0)
+                                                    .color(palette.danger_fg),
+                                            );
+                                            ui.label(
+                                                rich_bold(
+                                                    "Could not import Markdown file",
+                                                    13.0,
+                                                )
+                                                .color(palette.danger_fg),
+                                            );
+                                        });
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new(err_msg)
+                                                .size(12.5)
+                                                .color(palette.text),
+                                        );
+                                    });
+                            }
+                            (Some(Ok(report)), Some(plan)) => {
+                                let total = report.items.len();
+                                let item_word = if total == 1 { "item" } else { "items" };
+                                let day_word = if report.active_days == 1 {
+                                    "day"
+                                } else {
+                                    "days"
+                                };
+                                let ach_word = if plan.achievements_count == 1 {
+                                    "achievement"
+                                } else {
+                                    "achievements"
+                                };
+
+                                Frame::new()
+                                    .fill(palette.surface_muted)
+                                    .stroke(Stroke::new(1.0, palette.border))
+                                    .corner_radius(CornerRadius::same(7))
+                                    .inner_margin(Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        if total == 0 {
+                                            ui.label(
+                                                RichText::new(
+                                                    "0 work items found in this report (all day sections were empty).",
+                                                )
+                                                .size(12.0)
+                                                .color(palette.text_muted),
+                                            );
+                                        } else {
+                                            let dup_note = if plan.duplicate_count == 0 {
+                                                "0 already exist".to_string()
+                                            } else {
+                                                format!("{} already exist", plan.duplicate_count)
+                                            };
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "{total} {item_word} parsed · {} active {day_word} · {} {ach_word} · {dup_note}",
+                                                    report.active_days, plan.achievements_count
+                                                ))
+                                                .size(12.0)
+                                                .color(palette.text_muted),
+                                            );
+                                        }
+                                    });
+
+                                ui.add_space(12.0);
+                                ui.label(
+                                    rich_bold("Import Mode", 12.0).color(palette.text_muted),
+                                );
+                                ui.add_space(6.0);
+
+                                Frame::new()
+                                    .fill(palette.surface_muted)
+                                    .stroke(Stroke::new(1.0, palette.border))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(Margin::same(3))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
+                                            if settings_tab_button(
+                                                ui,
+                                                palette,
+                                                "Merge (skip duplicates)",
+                                                self.import_mode
+                                                    == ImportMode::MergeSkipDuplicates,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.import_mode = ImportMode::MergeSkipDuplicates;
+                                            }
+                                            if settings_tab_button(
+                                                ui,
+                                                palette,
+                                                "Replace date range",
+                                                self.import_mode == ImportMode::ReplaceDateRange,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.import_mode = ImportMode::ReplaceDateRange;
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(6.0);
+                                let mode_hint = match self.import_mode {
+                                    ImportMode::MergeSkipDuplicates => {
+                                        if total > 0 && plan.new_merge_count == 0 {
+                                            "All parsed items already exist on their respective dates. Switch to Replace date range to overwrite.".to_string()
+                                        } else if plan.duplicate_count > 0 {
+                                            format!(
+                                                "Adds {} new entries and skips {} matching entries already on the same date.",
+                                                plan.new_merge_count, plan.duplicate_count
+                                            )
+                                        } else {
+                                            "Keeps all existing entries and adds new items (skips matching date + title + category).".to_string()
+                                        }
+                                    }
+                                    ImportMode::ReplaceDateRange => match plan.replace_range {
+                                        Some((s, e)) => format!(
+                                            "Replaces {} existing entries from {} to {}; dates outside this range stay untouched.",
+                                            plan.existing_in_replace_range,
+                                            format_date_key(s),
+                                            format_date_key(e)
+                                        ),
+                                        None => {
+                                            "Replaces existing entries inside the report's date range.".to_string()
+                                        }
+                                    },
+                                };
+                                ui.label(
+                                    RichText::new(mode_hint)
+                                        .size(11.5)
+                                        .color(palette.text_muted),
+                                );
+
+                                ui.add_space(12.0);
+                                ui.label(
+                                    rich_bold("Preview", 12.0).color(palette.text_muted),
+                                );
+                                ui.add_space(6.0);
+
+                                Frame::new()
+                                    .fill(palette.background)
+                                    .stroke(Stroke::new(1.0, palette.border))
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(Margin::same(10))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ScrollArea::vertical()
+                                            .id_salt("import_preview_scroll")
+                                            .auto_shrink([false, false])
+                                            .max_height(190.0)
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                if report.items.is_empty() {
+                                                    ui.label(
+                                                        RichText::new(
+                                                            "No work items to preview in this report.",
+                                                        )
+                                                        .size(12.5)
+                                                        .color(palette.text_muted),
+                                                    );
+                                                } else {
+                                                    for (idx, (item, &is_dup)) in report
+                                                        .items
+                                                        .iter()
+                                                        .zip(plan.duplicate_flags.iter())
+                                                        .enumerate()
+                                                    {
+                                                        if idx > 0 {
+                                                            ui.add_space(6.0);
+                                                        }
+                                                        let skipped = self.import_mode
+                                                            == ImportMode::MergeSkipDuplicates
+                                                            && is_dup;
+                                                        Frame::new()
+                                                            .fill(palette.surface)
+                                                            .stroke(Stroke::new(
+                                                                1.0,
+                                                                palette.border,
+                                                            ))
+                                                            .corner_radius(CornerRadius::same(7))
+                                                            .inner_margin(Margin::symmetric(10, 8))
+                                                            .show(ui, |ui| {
+                                                                ui.set_width(ui.available_width());
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    ui.spacing_mut()
+                                                                        .item_spacing
+                                                                        .x = 6.0;
+                                                                    ui.label(
+                                                                        RichText::new(&item.date)
+                                                                            .monospace()
+                                                                            .size(11.5)
+                                                                            .color(
+                                                                                palette.text_muted,
+                                                                            ),
+                                                                    );
+                                                                    category_pill(
+                                                                        ui,
+                                                                        &item.category,
+                                                                        category_label(
+                                                                            &item.category,
+                                                                        ),
+                                                                        palette.is_dark,
+                                                                    );
+                                                                    if item.is_achievement {
+                                                                        let _ = achievement_badge(
+                                                                            ui, palette,
+                                                                        );
+                                                                    }
+                                                                    if skipped {
+                                                                        status_pill(
+                                                                            ui,
+                                                                            palette.surface_muted,
+                                                                            palette.border_strong,
+                                                                            palette.text_muted,
+                                                                            "Exists · skip",
+                                                                        );
+                                                                    }
+                                                                });
+                                                                ui.add_space(3.0);
+                                                                let title_col = if skipped {
+                                                                    palette.text_muted
+                                                                } else {
+                                                                    palette.text
+                                                                };
+                                                                ui.label(
+                                                                    rich_bold(&item.title, 13.0)
+                                                                        .color(title_col),
+                                                                );
+                                                                if !item.description.is_empty() {
+                                                                    let first_line = item
+                                                                        .description
+                                                                        .lines()
+                                                                        .next()
+                                                                        .unwrap_or_default();
+                                                                    ui.label(
+                                                                        RichText::new(first_line)
+                                                                            .size(11.5)
+                                                                            .color(
+                                                                                palette.text_muted,
+                                                                            ),
+                                                                    );
+                                                                }
+                                                            });
+                                                    }
+                                                }
+                                            });
+                                    });
+                            }
+                            _ => {}
+                        }
+                    });
+
+                let (import_count, can_import) = match (&self.import_parsed, &plan_opt) {
+                    (Some(Ok(report)), Some(plan)) => match self.import_mode {
+                        ImportMode::MergeSkipDuplicates => {
+                            (plan.new_merge_count, plan.new_merge_count > 0)
+                        }
+                        ImportMode::ReplaceDateRange => {
+                            (report.items.len(), !report.items.is_empty())
+                        }
+                    },
+                    _ => (0, false),
+                };
+
+                let cta_caption = match (&self.import_parsed, import_count) {
+                    (None | Some(Err(_)), _) => "Import Items".to_string(),
+                    (_, 1) => "Import 1 Item".to_string(),
+                    (_, n) => format!("Import {n} Items"),
+                };
+
+                horizontal_divider(ui, palette.divider);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            let cta_label = icon_label_bold(
+                                UPLOAD_SIMPLE,
+                                &cta_caption,
+                                13.0,
+                                palette.on_primary,
+                            );
+                            if primary_button_enabled(ui, palette, cta_label, can_import).clicked()
+                            {
+                                trigger_import = true;
+                            }
+                            if secondary_button(ui, palette, "Cancel").clicked() {
+                                close_requested = true;
+                            }
+                        });
+                    });
+            });
+
+        if pick_file_clicked {
+            if let Some(path) = choose_report_file(
+                "Time Tracker — Import Markdown Report",
+                "Markdown",
+                &["md", "markdown"],
+                None,
+            ) {
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                let read_res = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("Failed to read '{}': {e}", path.display()));
+                self.load_import_markdown_content(file_name, read_res);
+            }
+        }
+
+        if trigger_import {
+            self.confirm_markdown_import();
+        } else if close_requested {
+            self.show_import = false;
         }
     }
 
@@ -1912,6 +2834,37 @@ impl WeeklyTrackerApp {
                                             .size(11.5)
                                             .color(palette.text_faint),
                                         );
+                                        ui.add_space(12.0);
+                                        horizontal_divider(ui, palette.divider);
+                                        ui.add_space(12.0);
+                                        ui.label(
+                                            rich_bold("Import from Markdown report", 13.0)
+                                                .color(palette.text),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Merge or restore work items from an exported Time Tracker .md file.",
+                                            )
+                                            .size(12.0)
+                                            .color(palette.text_muted),
+                                        );
+                                        ui.add_space(10.0);
+                                        if secondary_button(
+                                            ui,
+                                            palette,
+                                            icon_label(
+                                                UPLOAD_SIMPLE,
+                                                "Import from Markdown (.md)…",
+                                                13.0,
+                                                palette.text,
+                                            ),
+                                        )
+                                        .clicked()
+                                        {
+                                            close_requested = true;
+                                            self.open_import_modal();
+                                        }
                                     }
                                     SettingsTab::Updates => {
                                         ui.label(
@@ -2273,9 +3226,14 @@ mod tests {
             hover_date: None,
             theme: ThemeId::Default,
             prefs: Prefs::default(),
+            show_import: false,
             show_export: false,
             show_settings: false,
             settings_tab: SettingsTab::Storage,
+            import_mode: ImportMode::MergeSkipDuplicates,
+            import_file_name: None,
+            import_parsed: None,
+            import_banner: None,
             form_mode: None,
             form_item_id: None,
             form_date: None,
@@ -2429,5 +3387,153 @@ mod tests {
                 },
             );
         }
+
+        // 4. Import Markdown modal across empty, error, Merge preview, and Replace preview states.
+        app.open_import_modal();
+        for theme in [ThemeId::Default, ThemeId::Dark] {
+            app.theme = theme;
+            apply_visuals(&ctx, theme);
+            let p = app.palette();
+
+            app.import_file_name = None;
+            app.import_parsed = None;
+            let _ = ctx.run(
+                raw_input_sized(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+                |ctx| app.import_modal(ctx, p),
+            );
+
+            app.load_import_markdown_content("invalid.md".into(), Ok("# Not a report".into()));
+            let _ = ctx.run(
+                raw_input_sized(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+                |ctx| app.import_modal(ctx, p),
+            );
+
+            let valid_md = generate_markdown_for_range(&app.items, today, today);
+            app.load_import_markdown_content("report.md".into(), Ok(valid_md));
+            for mode in [ImportMode::MergeSkipDuplicates, ImportMode::ReplaceDateRange] {
+                app.import_mode = mode;
+                let _ = ctx.run(
+                    raw_input_sized(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+                    |ctx| app.import_modal(ctx, p),
+                );
+            }
+        }
+    }
+
+    /// Verifies that `MergeSkipDuplicates` skips entries matching `(date, case-insensitive trimmed
+    /// title, category)` while appending genuinely new entries, and that `ReplaceDateRange`
+    /// replaces entries strictly inside `start_date..=end_date` while leaving outside dates intact.
+    #[test]
+    fn markdown_import_merge_skips_duplicates_and_replace_scopes_to_range() {
+        let now = Utc::now();
+        let mk = |id: &str, date: &str, title: &str, cat: &str, ach: bool| WorkItem {
+            id: id.into(),
+            date: date.into(),
+            title: title.into(),
+            description: String::new(),
+            category: cat.into(),
+            is_achievement: ach,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let mut existing = vec![
+            mk("keep-oct", "2026-10-31", "October prep", "planning", false),
+            mk("dup-nov", "2026-11-17", "Ship Feature", "development", true),
+            mk("old-nov", "2026-11-18", "Temporary draft", "other", false),
+        ];
+
+        let md = "\
+# Report: Nov 17 - Nov 19, 2026
+
+## Work Items
+
+### Tuesday, Nov 17
+
+-   ship feature   *(Development)* ⭐
+- Code review pass *(Code Review)*
+
+### Wednesday, Nov 18
+
+*(No items)*
+
+### Thursday, Nov 19
+
+- Release v0.2.0 - Tagged & published *(DevOps)* ⭐
+";
+        let report = parse_markdown_report(md).expect("report parses");
+        let plan = compute_import_plan(&existing, &report);
+        assert_eq!(plan.duplicate_count, 1);
+        assert_eq!(plan.new_merge_count, 2);
+        assert_eq!(plan.existing_in_replace_range, 2);
+
+        // 1. Merge mode skips "ship feature" duplicate on Nov 17, keeps "Temporary draft" on Nov 18,
+        // and imports the 2 new entries (latest date = 2026-11-19).
+        let mut merged = existing.clone();
+        let merge_outcome =
+            apply_markdown_import(&mut merged, &report, ImportMode::MergeSkipDuplicates);
+        assert_eq!(merge_outcome.imported_count, 2);
+        assert_eq!(
+            merge_outcome.latest_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 19)
+        );
+        assert_eq!(merged.len(), 5);
+        assert!(merged.iter().any(|i| i.id == "old-nov"));
+
+        // 2. ReplaceDateRange removes "dup-nov" & "old-nov" inside Nov 17..=Nov 19, preserves
+        // "keep-oct" (Oct 31) outside the range, and inserts all 3 report items.
+        let replace_outcome =
+            apply_markdown_import(&mut existing, &report, ImportMode::ReplaceDateRange);
+        assert_eq!(replace_outcome.imported_count, 3);
+        assert_eq!(
+            replace_outcome.latest_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 19)
+        );
+        assert_eq!(existing.len(), 4);
+        assert!(existing.iter().any(|i| i.id == "keep-oct"));
+        assert!(!existing.iter().any(|i| i.id == "old-nov"));
+    }
+
+    /// Locks the Linux file chooser to zenity. Opening the XDG portal from `rfd` segfaults in
+    /// zbus (`PropertiesCache::update_cache`) before rfd can fall back, so a regression that
+    /// puts `--file-selection` behind the portal would crash import again.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_report_dialog_uses_zenity_not_the_xdg_portal() {
+        let open = report_file_dialog_command(
+            "Time Tracker — Import Markdown Report",
+            "Markdown",
+            &["md", "markdown"],
+            None,
+        );
+        assert_eq!(open.get_program().to_string_lossy(), "zenity");
+        let open_args: Vec<String> = open
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(open_args.iter().any(|a| a == "--file-selection"));
+        assert!(open_args.iter().any(|a| a == "--no-markup"));
+        assert!(open_args
+            .iter()
+            .any(|a| a == "Markdown | *.md *.markdown"));
+        assert!(!open_args.iter().any(|a| a == "--save"));
+
+        let save = report_file_dialog_command(
+            "Time Tracker — Export Report",
+            "Markdown",
+            &["md"],
+            Some("report-2026-11-01-to-2026-11-30.md"),
+        );
+        let save_args: Vec<String> = save
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(save_args
+            .windows(2)
+            .any(|w| w[0] == "--save" && w[1] == "--confirm-overwrite"));
+        assert!(save_args
+            .iter()
+            .any(|a| a == "report-2026-11-01-to-2026-11-30.md"));
+        assert!(save_args.iter().any(|a| a == "Markdown | *.md"));
     }
 }

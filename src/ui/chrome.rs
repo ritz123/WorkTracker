@@ -936,6 +936,17 @@ pub fn accent_ghost_button_enabled(
 
 /// Soft accent button used for the empty-state `"+ Add Work Item"` action in `DayDetailPanel`.
 pub fn soft_accent_button(ui: &mut Ui, palette: Palette, label: RichText) -> Response {
+    soft_accent_button_enabled(ui, palette, label, true)
+}
+
+/// Soft accent button with explicit `enabled` control (used for `"Download .md"` alongside the
+/// primary `"Download PDF"` CTA in the Export modal footer so disabled ranges dim consistently).
+pub fn soft_accent_button_enabled(
+    ui: &mut Ui,
+    palette: Palette,
+    label: RichText,
+    enabled: bool,
+) -> Response {
     custom_button(
         ui,
         label.font(font_bold(13.0)),
@@ -953,7 +964,7 @@ pub fn soft_accent_button(ui: &mut Ui, palette: Palette, label: RichText) -> Res
             min_size: BTN_MIN_SIZE,
             radius: BTN_RADIUS_PX,
         },
-        true,
+        enabled,
     )
 }
 

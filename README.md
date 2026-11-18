@@ -13,7 +13,7 @@ cargo build --release
 cargo run
 ```
 
-Data is stored under `~/.weekly-tracker/` (same `data.json` / `prefs.json` shape as the original).
+Data is stored under `~/.weekly-tracker/` (same `data.json` / `prefs.json` shape as the original). You can also import exported `.md` reports at any time via **Import** in the top bar (or **Settings → Storage**), choosing either **Merge (skip duplicates)** or **Replace date range**, and export reports to `.md` or vector `.pdf`.
 
 ## License
 

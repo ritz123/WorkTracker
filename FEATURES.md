@@ -28,16 +28,18 @@ Reference implementation: Electron + React app in `TimeTracker-master/`.
 | Day click (pin) | Toggle pinned day; when unpinned, detail follows hover |
 | Day hover | Preview that day’s items in the side panel |
 
-## Export
+## Import & Export
 
 | Feature | Description |
 |---------|-------------|
+| Markdown import | Load exported `.md` reports via toolbar **Import** or **Settings → Storage** with validation preview |
+| Import modes | **Merge (skip duplicates)** (same date + title + category) or **Replace date range** |
 | Date range | From / to with validation |
 | Presets | This week, last 7 days, last 30 days, this month |
 | Preview | Report structure before export |
 | Markdown download | Save `.md` via system dialog; open file after save |
+| PDF download | Save A4 vector `.pdf` report via system dialog (active days only — empty days omitted); open file after save |
 | Report contents | Achievements section + per-day work items |
-| PDF (original) | html2pdf in JS app — not ported in Rust v0.1 (export MD instead) |
 
 ## Appearance
 
@@ -51,7 +53,7 @@ Reference implementation: Electron + React app in `TimeTracker-master/`.
 
 | Feature | Description |
 |---------|-------------|
-| Storage tab | Explains local `~/.weekly-tracker/` layout |
+| Storage tab | Explains local `~/.weekly-tracker/` layout and provides `.md` report import |
 | Updates tab | Check on startup (optional), manual GitHub release check |
 | Update banner | Shown under toolbar when newer release detected |
 | About | Name, version, tagline, GPL description |
@@ -77,4 +79,4 @@ Reference implementation: Electron + React app in `TimeTracker-master/`.
 
 ## Rust port status
 
-Implemented in `weekly_work_tracker`: calendar (grid styling), CRUD, copy, themes, export MD, settings/about, splash screen, GitHub release check + banner, compatible data paths. PDF export deferred.
+Implemented in `weekly_work_tracker`: calendar (grid styling), CRUD, copy, themes, import MD (merge/replace with preview), export MD + vector PDF (active days only), settings/about, splash screen, GitHub release check + banner, compatible data paths.

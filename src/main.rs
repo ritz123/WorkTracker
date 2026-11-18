@@ -4,6 +4,7 @@ mod ui;
 mod dates;
 mod markdown;
 mod models;
+mod pdf;
 mod storage;
 mod theme;
 mod updates;

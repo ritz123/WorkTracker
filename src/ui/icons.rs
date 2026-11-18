@@ -107,9 +107,12 @@ pub const CARET_LEFT: &str = "\u{E138}";
 pub const CARET_RIGHT: &str = "\u{E13A}";
 pub const CALENDAR_BLANK: &str = "\u{E10A}";
 pub const CHECK: &str = "\u{E182}";
+pub const CHECK_CIRCLE: &str = "\u{E184}";
 pub const COPY: &str = "\u{E1CA}";
 pub const DOWNLOAD: &str = "\u{E20A}";
 pub const EXPORT: &str = "\u{EAF0}";
+pub const FILE_TEXT: &str = "\u{E23A}";
+pub const FOLDER_OPEN: &str = "\u{E256}";
 pub const GEAR: &str = "\u{E270}";
 pub const PENCIL: &str = "\u{E3B4}";
 pub const PLUS: &str = "\u{E3D4}";
@@ -117,6 +120,8 @@ pub const PUSH_PIN: &str = "\u{E3E2}";
 pub const PUSH_PIN_SLASH: &str = "\u{E3E4}";
 pub const STAR: &str = "\u{E46A}";
 pub const TRASH: &str = "\u{E4A6}";
+pub const UPLOAD_SIMPLE: &str = "\u{E4C0}";
+pub const WARNING_CIRCLE: &str = "\u{E4E2}";
 pub const X: &str = "\u{E4F6}";
 
 /// Icon-only [`RichText`] at `size` logical pixels and `color`.
