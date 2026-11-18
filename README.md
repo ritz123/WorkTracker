@@ -1,4 +1,4 @@
-# Weekly Work Tracker (Rust)
+# Work Tracker (Rust)
 
 Native desktop port of [TimeTracker-master](./TimeTracker-master/) using **eframe/egui**, with UI tokens from **ui-ux-pro-max** (see [design-system/weekly-work-tracker/MASTER.md](./design-system/weekly-work-tracker/MASTER.md)).
 

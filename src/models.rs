@@ -45,7 +45,7 @@ impl Default for Prefs {
     }
 }
 
-pub const APP_NAME: &str = "Time Tracker";
+pub const APP_NAME: &str = "Work Tracker";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const APP_TAGLINE: &str = "Track your work. Celebrate your wins.";
 pub const APP_REPO_URL: &str = "https://github.com/ritz123/TimeTracker";

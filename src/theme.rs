@@ -755,7 +755,7 @@ mod tests {
             apply_visuals(&ctx, theme);
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.heading("Time Tracker");
+                    ui.heading("Work Tracker");
                     ui.label("Body copy check");
                 });
             });

@@ -2079,7 +2079,7 @@ mod tests {
                             p,
                             theme,
                             HeroContent {
-                                app_name: "Time Tracker",
+                                app_name: "Work Tracker",
                                 tagline: "Track your work. Celebrate your wins.",
                                 viewing_context: "Viewing November 2026",
                                 this_week_count: 5,

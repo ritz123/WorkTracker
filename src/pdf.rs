@@ -781,7 +781,7 @@ fn draw_report_header(canvas: &mut PdfCanvas, start: NaiveDate, end: NaiveDate, 
         PdfFont::Bold,
         8.5,
         ACCENT_PRIMARY,
-        "TIME TRACKER  \u{00B7}  WORK REPORT",
+        "WORK TRACKER  \u{00B7}  WORK REPORT",
     );
 
     // Bold report range title.
@@ -1050,7 +1050,7 @@ fn draw_footers(canvas: &mut PdfCanvas) {
         );
         let _ = writeln!(
             page,
-            "BT /F1 8.50 Tf {:.4} {:.4} {:.4} rg 1 0 0 1 {MARGIN_X:.2} 26.50 Tm (Time Tracker) Tj ET",
+            "BT /F1 8.50 Tf {:.4} {:.4} {:.4} rg 1 0 0 1 {MARGIN_X:.2} 26.50 Tm (Work Tracker) Tj ET",
             INK_FAINT.0, INK_FAINT.1, INK_FAINT.2
         );
         let _ = writeln!(
@@ -1143,7 +1143,7 @@ fn serialize_pdf_document(pages: &[String]) -> Vec<u8> {
         &mut out,
         &mut offsets,
         info_id,
-        "<< /Title (Time Tracker Work Report) /Producer (Time Tracker) >>",
+        "<< /Title (Work Tracker Work Report) /Producer (Work Tracker) >>",
     );
 
     let xref_offset = out.len();

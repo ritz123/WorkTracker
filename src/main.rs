@@ -18,14 +18,14 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT])
             .with_min_inner_size([MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
-            .with_title("Time Tracker")
+            .with_title("Work Tracker")
             // The OS title bar, borders, and window buttons are off. The toolbar is the drag
             // surface and hosts Close; `undecorated_window_edges` restores edge resizing.
             .with_decorations(false),
         ..Default::default()
     };
     eframe::run_native(
-        "Time Tracker",
+        "Work Tracker",
         options,
         Box::new(|cc| Ok(Box::new(app::WeeklyTrackerApp::new(cc)))),
     )

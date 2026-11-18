@@ -41,7 +41,7 @@ use crate::categories::{category_label, CATEGORIES};
 use crate::dates::{format_date_key, format_day_full, parse_date_key, today_local};
 use crate::models::WorkItem;
 
-/// Structured result of parsing an exported Time Tracker Markdown (`.md`) report.
+/// Structured result of parsing an exported Work Tracker Markdown (`.md`) report.
 #[derive(Debug, Clone)]
 pub struct ParsedMarkdownReport {
     /// Inclusive start date of the report (`# Report:` start or earliest `### <Day>` heading).
@@ -64,7 +64,7 @@ fn each_day_inclusive(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
     days
 }
 
-/// Serializes `items` falling within `start..=end` into the canonical Time Tracker Markdown report.
+/// Serializes `items` falling within `start..=end` into the canonical Work Tracker Markdown report.
 ///
 /// Emits a `# Report:` range title, an optional `## Achievements` highlight list when at least one
 /// starred item falls inside the range, and a `## Work Items` section with a `### Weekday, Mon D`
@@ -149,7 +149,7 @@ enum ReportSection {
     Other,
 }
 
-/// Parses an exported Time Tracker Markdown (`.md`) report back into [`WorkItem`] entries.
+/// Parses an exported Work Tracker Markdown (`.md`) report back into [`WorkItem`] entries.
 ///
 /// Responsibility & flow:
 /// - Validates that `md` is non-empty and contains at least one recognizable `### <Day>` section;
@@ -173,7 +173,7 @@ fn parse_markdown_report_with_fallback_year(
     let md = md.strip_prefix('\u{FEFF}').unwrap_or(md);
     if md.trim().is_empty() {
         return Err(
-            "The selected Markdown file is empty. Choose an exported Time Tracker .md report."
+            "The selected Markdown file is empty. Choose an exported Work Tracker .md report."
                 .into(),
         );
     }

@@ -1247,7 +1247,7 @@ impl WeeklyTrackerApp {
         horizontal_divider(ui, palette.border);
     }
 
-    /// Renders the brand-themed Hero Banner (`Time Tracker — Track your work. Celebrate your wins.`)
+    /// Renders the brand-themed Hero Banner (`Work Tracker — Track your work. Celebrate your wins.`)
     /// with live ISO-week, viewed-month, and achievement telemetry pills plus the `+ Log Today`
     /// one-click CTA.
     fn brand_hero(&mut self, ui: &mut egui::Ui, palette: Palette, compact_height: bool) {
@@ -2240,7 +2240,7 @@ impl WeeklyTrackerApp {
                                             self.export_start, self.export_end
                                         );
                                         if let Some(path) = choose_report_file(
-                                            "Time Tracker — Export PDF Report",
+                                            "Work Tracker — Export PDF Report",
                                             "PDF",
                                             &["pdf"],
                                             Some(&filename),
@@ -2269,7 +2269,7 @@ impl WeeklyTrackerApp {
                                             self.export_start, self.export_end
                                         );
                                         if let Some(path) = choose_report_file(
-                                            "Time Tracker — Export Report",
+                                            "Work Tracker — Export Report",
                                             "Markdown",
                                             &["md"],
                                             Some(&filename),
@@ -2336,7 +2336,7 @@ impl WeeklyTrackerApp {
                     ui,
                     palette,
                     "Import Markdown Report",
-                    Some("Load work items from an exported Time Tracker .md report"),
+                    Some("Load work items from an exported Work Tracker .md report"),
                 ) {
                     close_requested = true;
                 }
@@ -2466,7 +2466,7 @@ impl WeeklyTrackerApp {
                                             ui.add_space(10.0);
                                             ui.label(
                                                 rich_bold(
-                                                    "Select a Time Tracker Markdown report",
+                                                    "Select a Work Tracker Markdown report",
                                                     13.5,
                                                 )
                                                 .color(palette.text),
@@ -2795,7 +2795,7 @@ impl WeeklyTrackerApp {
 
         if pick_file_clicked {
             if let Some(path) = choose_report_file(
-                "Time Tracker — Import Markdown Report",
+                "Work Tracker — Import Markdown Report",
                 "Markdown",
                 &["md", "markdown"],
                 None,
@@ -2934,7 +2934,7 @@ impl WeeklyTrackerApp {
                                         ui.add_space(4.0);
                                         ui.label(
                                             RichText::new(
-                                                "Merge or restore work items from an exported Time Tracker .md file.",
+                                                "Merge or restore work items from an exported Work Tracker .md file.",
                                             )
                                             .size(12.0)
                                             .color(palette.text_muted),
@@ -3782,7 +3782,7 @@ mod tests {
     #[test]
     fn linux_report_dialog_uses_zenity_not_the_xdg_portal() {
         let open = report_file_dialog_command(
-            "Time Tracker — Import Markdown Report",
+            "Work Tracker — Import Markdown Report",
             "Markdown",
             &["md", "markdown"],
             None,
@@ -3800,7 +3800,7 @@ mod tests {
         assert!(!open_args.iter().any(|a| a == "--save"));
 
         let save = report_file_dialog_command(
-            "Time Tracker — Export Report",
+            "Work Tracker — Export Report",
             "Markdown",
             &["md"],
             Some("report-2026-11-01-to-2026-11-30.md"),
