@@ -15,10 +15,8 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux
-            asset: WorkTracker
           - os: windows-latest
             name: Windows
-            asset: WorkTracker.exe
     steps:
       - uses: actions/checkout@v4
 
