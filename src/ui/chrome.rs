@@ -135,44 +135,26 @@ pub fn cal_month_grid_content_height(week_rows: usize, day_cell: Vec2) -> f32 {
     frame_margin + rows as f32 * day_cell.y + gap * (rows.saturating_sub(1)) as f32
 }
 
-/// How far the bar fill moves from its theme base toward white. Chosen so white ink on the bar
-/// still meets WCAG AA (4.5:1) for the 11px footer text in every theme. Warm is the limiting
-/// case: its amber base `#B45309` is already only about 5:1 and drops to 4.2:1 at 10%. The test
-/// `chrome_bar_fill_keeps_white_ink_readable_in_every_theme` enforces the bound.
-const CHROME_BAR_LIGHTEN: f32 = 0.05;
-
 /// Brand fill shared by the frameless title bar and the bottom status bar.
 ///
-/// The base comes from the theme's palette: [`Palette::primary`] for light themes (blue,
-/// emerald, amber, ocean, rose), and [`Palette::primary_active`] for dark. Dark needs the
-/// deeper base because its `primary` (`#3B82F6`) is too light for white text. The base is then
-/// lightened by [`CHROME_BAR_LIGHTEN`] so the bar reads as a lighter shade of the theme color
-/// rather than the exact palette swatch. Callers that draw ink on this fill must use
-/// [`Palette::on_primary`] or [`title_bar_icon_palette`].
+/// [`Palette::accent_soft`] is the palest brand wash and, on Forest, sits next to the page
+/// ground (`#ECFDF5` against `#F4F7F5`), so a bar painted with it does not read as tinted.
+/// [`Palette::accent_soft_hover`] is the next step in the same palette and is still a light
+/// tint: Forest `#D1FAE5`, Ocean `#E0F2FE`, Warm `#FDE68A`, Rose `#FFE4E6`, Default `#DBEAFE`.
+/// Dark stores that step with an alpha, so it is composited over [`Palette::surface`] to stay
+/// opaque (`#1B3056`). Ink on the bar stays [`Palette::text`], which clears 4.5:1 on every theme.
 pub fn chrome_bar_fill(palette: Palette) -> Color32 {
-    let base = if palette.is_dark {
-        palette.primary_active
-    } else {
-        palette.primary
-    };
-    base.lerp_to_gamma(Color32::WHITE, CHROME_BAR_LIGHTEN)
-}
-
-/// Icon-button colors for controls sitting on [`chrome_bar_fill`].
-///
-/// [`ghost_icon_button`] paints idle ink from `text_muted` and hover ink from `text`, with
-/// hover fills from `surface_muted` / `surface_hover`. Those tokens are dark-on-light in every
-/// light theme, so using them unchanged on the brand bar hides Settings and the window
-/// controls. This copy keeps every other token (so a menu opened from the bar still matches
-/// the page) and swaps only the four fields the ghost button reads.
-pub fn title_bar_icon_palette(palette: Palette) -> Palette {
-    Palette {
-        text: palette.on_primary,
-        text_muted: Color32::from_white_alpha(210),
-        surface_muted: Color32::from_white_alpha(32),
-        surface_hover: Color32::from_white_alpha(56),
-        ..palette
+    let tint = palette.accent_soft_hover;
+    if tint.a() == 255 {
+        return tint;
     }
+    let a = f32::from(tint.a()) / 255.0;
+    let blend = |fg: u8, bg: u8| (f32::from(fg) * a + f32::from(bg) * (1.0 - a)).round() as u8;
+    Color32::from_rgb(
+        blend(tint.r(), palette.surface.r()),
+        blend(tint.g(), palette.surface.g()),
+        blend(tint.b(), palette.surface.b()),
+    )
 }
 
 /// Colored title-bar shell (`chrome_bar_fill`, zero outer margin).
@@ -2052,18 +2034,22 @@ mod tests {
         0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
     }
 
-    /// Guards the contrast promise made in [`CHROME_BAR_LIGHTEN`]: the footer's white text on the
-    /// bar must reach 4.5:1 in every theme. The check fails if a palette change or a larger
-    /// lighten amount drops the bar below that bound.
+    /// Checks that text on the chrome bar reaches WCAG AA (4.5:1) for `palette.text` in every theme.
     #[test]
-    fn chrome_bar_fill_keeps_white_ink_readable_in_every_theme() {
+    fn chrome_bar_fill_keeps_text_readable_in_every_theme() {
         for theme in ThemeId::ALL {
-            let fill = chrome_bar_fill(Palette::for_theme(theme));
-            let (hi, lo) = (1.0_f64, relative_luminance(fill));
+            let palette = Palette::for_theme(theme);
+            let fill = chrome_bar_fill(palette);
+            let (l_bg, l_fg) = (relative_luminance(fill), relative_luminance(palette.text));
+            let (hi, lo) = if l_bg > l_fg {
+                (l_bg, l_fg)
+            } else {
+                (l_fg, l_bg)
+            };
             let ratio = (hi + 0.05) / (lo + 0.05);
             assert!(
                 ratio >= 4.5,
-                "{:?}: white on bar fill {fill:?} is {ratio:.2}:1, below 4.5:1",
+                "{:?}: text on bar fill {fill:?} is {ratio:.2}:1, below 4.5:1",
                 theme
             );
         }
