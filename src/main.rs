@@ -1,3 +1,8 @@
+// Without this, the Windows linker marks the executable as a console program, so
+// starting Work Tracker from the desktop or the Start menu opens an empty
+// terminal behind the window. Linux and macOS ignore the attribute.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod categories;
 mod ui;
