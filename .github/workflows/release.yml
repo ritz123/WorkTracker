@@ -17,6 +17,8 @@ jobs:
             name: Linux
           - os: windows-latest
             name: Windows
+          - os: macos-latest
+            name: macOS
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +65,52 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME#v}"
           cp target/release/weekly_work_tracker "WorkTracker-${tag}-linux"
+
+      # A .app bundle, zipped, so Finder shows the clock icon and launches the app
+      # without a Terminal window. ditto keeps the bundle layout that a plain
+      # zip tool would flatten. The app is not signed with an Apple developer
+      # certificate, so the first launch needs right-click > Open (see README).
+      - name: Build the macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app="WorkTracker.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/weekly_work_tracker "$app/Contents/MacOS/WorkTracker"
+
+          # iconutil needs one PNG per size. The 256px master is the largest
+          # source, so no 256@2x entry: enlarging the master to 512px would blur it.
+          iconset=WorkTracker.iconset
+          mkdir "$iconset"
+          for s in 16 32 128 256; do
+            sips -z "$s" "$s" packaging/icon/worktracker.png --out "$iconset/icon_${s}x${s}.png" >/dev/null
+          done
+          for s in 16 32 128; do
+            d=$((s * 2))
+            sips -z "$d" "$d" packaging/icon/worktracker.png --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/WorkTracker.icns"
+
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>WorkTracker</string>
+            <key>CFBundleDisplayName</key><string>Work Tracker</string>
+            <key>CFBundleIdentifier</key><string>io.github.ritz123.worktracker</string>
+            <key>CFBundleExecutable</key><string>WorkTracker</string>
+            <key>CFBundleIconFile</key><string>WorkTracker</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${tag}</string>
+            <key>CFBundleVersion</key><string>${tag}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          ditto -c -k --keepParent "$app" "WorkTracker-${tag}-macos.zip"
 
       # A setup program, not the loose executable. Inno Setup installs it for
       # the current user and adds the Start menu shortcut. The plain exe is
