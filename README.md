@@ -1,6 +1,6 @@
 # Work Tracker (Rust)
 
-Native desktop port of the Electron [Time Tracker](https://github.com/ritz123/TimeTracker) app using **eframe/egui**, with UI tokens from **ui-ux-pro-max** (see [design-system/weekly-work-tracker/MASTER.md](./design-system/weekly-work-tracker/MASTER.md)).
+Native desktop port of the Electron [Time Tracker](https://github.com/ritz123/TimeTracker) app using **eframe/egui**, with its UI tokens defined in `src/theme.rs` and `src/ui/chrome.rs`.
 
 ## Feature list
 
@@ -26,7 +26,7 @@ The Linux job installs the X11, Wayland, and GTK libraries that eframe links aga
 
 ## Versions and releases
 
-A release is a git tag of the form `vMAJOR.MINOR.PATCH`. Pushing that tag is the version bump. GitHub builds Linux and Windows binaries from the tagged commit, writes the tag into the version the app reports, and publishes a GitHub Release with both files attached.
+A release is a git tag of the form `vMAJOR.MINOR.PATCH`. Pushing that tag is the version bump. The app reports that tag: `build.rs` reads it at compile time and strips the leading `v`. A build with no tag falls back to `version` in `Cargo.toml`. GitHub passes the pushed tag into the release build, so the published binaries report that version, then publishes a GitHub Release with both files attached.
 
 ```bash
 git tag v0.2.0

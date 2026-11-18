@@ -39,33 +39,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The pushed tag is the version bump. Stamp it into Cargo.toml before
-      # compiling so the binary reports that number, even when the tagged
-      # commit still has an older `version` field. Only vMAJOR.MINOR.PATCH
-      # is accepted; anything else would not compare cleanly in the update check.
-      - name: Stamp the tag version into the build
+      # The tag is the version. build.rs reads WORK_TRACKER_VERSION and the
+      # binary reports that number. A tag that is not vMAJOR.MINOR.PATCH is
+      # rejected so the in-app update check can compare it.
+      - name: Check the tag is a version
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          echo "tag=$tag"
           echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          awk -v ver="$tag" '
-            BEGIN { done = 0 }
-            /^version = / && !done {
-              print "version = \"" ver "\""
-              done = 1
-              next
-            }
-            { print }
-          ' Cargo.toml > Cargo.toml.stamped
-          grep -q "^version = \"$tag\"$" Cargo.toml.stamped
-          mv Cargo.toml.stamped Cargo.toml
-          grep -n '^version = ' Cargo.toml
 
       - name: Test
+        env:
+          WORK_TRACKER_VERSION: ${{ github.ref_name }}
         run: cargo test --bin weekly_work_tracker
 
       - name: Release build
+        env:
+          WORK_TRACKER_VERSION: ${{ github.ref_name }}
         run: cargo build --release --bin weekly_work_tracker
 
       - name: Stage the binary

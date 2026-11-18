@@ -46,9 +46,9 @@ impl Default for Prefs {
 }
 
 pub const APP_NAME: &str = "Work Tracker";
-/// Reported version. Comes from `version` in `Cargo.toml`, so a release tag
-/// and the running app always name the same number.
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Reported version. `build.rs` sets this from the git tag (`v1.2.3` becomes
+/// `1.2.3`). With no tag it falls back to `version` in `Cargo.toml`.
+pub const APP_VERSION: &str = env!("WORK_TRACKER_VERSION");
 pub const APP_TAGLINE: &str = "Track your work. Celebrate your wins.";
 /// This crate's repository. The About link and the update check both read it.
 /// The Electron app is a different repository and is not this release feed.
