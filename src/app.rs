@@ -3,8 +3,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Utc};
 use egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Layout, Order, RichText,
-    ScrollArea, Sense, Stroke, StrokeKind, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Layout, Margin,
+    Order, Pos2, RichText, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
 };
 use uuid::Uuid;
 
@@ -22,18 +22,23 @@ use crate::models::{
 };
 use crate::storage::{load_items, load_prefs, save_items, save_prefs, storage_dir_display};
 use crate::theme::{apply_visuals, Palette, ThemeId};
-use crate::ui::icons::{
-    self, icon_label, icon_text, CALENDAR_BLANK, CARET_LEFT, CARET_RIGHT, COPY, EXPORT, GEAR,
-    PALETTE, PENCIL, PLUS, PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH,
-};
 use crate::ui::chrome::{
-    achievement_indicator, cal_day_cell_for_layout, cal_month_grid_content_height,
-    calendar_column_width, calendar_outer_frame,
-    card_frame, detail_column_frame, modal_content_frame, paint_modal_backdrop,
-    paint_vertical_gradient_band, paint_week_column_cell, pill_button, primary_button,
-    secondary_button, splash_gradient, toolbar_action_button, toolbar_divider,
-    toolbar_gradient, toolbar_panel_frame, toolbar_text_button, CAL_WEEK_COL_WIDTH,
-    DETAIL_COLUMN_MIN_WIDTH, SPACE_MD, SPACE_SM, SPACE_XS,
+    accent_ghost_button_enabled, achievement_badge, achievement_toggle_chip,
+    cal_day_cell_for_layout, cal_month_grid_content_height, calendar_card_frame,
+    calendar_column_width, calendar_outer_frame, card_frame, category_pill, dashed_add_bar_button,
+    detail_column_frame, ghost_button_compact, ghost_icon_button, horizontal_divider, modal_header,
+    modal_window_frame, paint_brand_hero_banner, paint_modal_backdrop, paint_week_column_cell,
+    preset_button, primary_button, primary_button_compact, primary_button_enabled,
+    scrubber_icon_button, scrubber_today_button, secondary_button, settings_tab_button,
+    soft_accent_button, status_pill, styled_multiline_input, styled_singleline_input,
+    theme_menu_row, theme_swatch_button, toggle_icon_button, toolbar_panel_frame, vertical_divider,
+    HeroContent, CAL_WEEK_COL_WIDTH, CARD_RADIUS, DETAIL_COLUMN_MIN_WIDTH, SPACE_LG, SPACE_MD,
+    SPACE_SM, SPACE_XS,
+};
+use crate::ui::icons::{
+    self, font_bold, icon_label, icon_label_bold, rich_bold, CALENDAR_BLANK, CARET_LEFT,
+    CARET_RIGHT, COPY, DOWNLOAD, EXPORT, GEAR, PENCIL, PLUS, PUSH_PIN, PUSH_PIN_SLASH, TIMER,
+    TRASH,
 };
 use crate::updates::{self, UpdateCheckResult};
 
@@ -67,6 +72,52 @@ enum UpdateNotice {
 enum UpdatePollKind {
     Startup,
     Settings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeroMetrics {
+    this_week_count: usize,
+    month_count: usize,
+    month_achievements: usize,
+}
+
+impl HeroMetrics {
+    /// Aggregates live workspace pulse counts from `items` relative to `today`'s ISO week
+    /// (`Mon..=Sun`) and the calendar's `viewed_month`.
+    ///
+    /// Malformed external `date` strings in `data.json` are skipped safely rather than panicking.
+    fn compute(
+        items: &[WorkItem],
+        viewed_month: chrono::NaiveDate,
+        today: chrono::NaiveDate,
+    ) -> Self {
+        let week_start = start_of_week(today);
+        let week_end = end_of_week(today);
+        let mut this_week_count = 0;
+        let mut month_count = 0;
+        let mut month_achievements = 0;
+
+        for item in items {
+            let Some(d) = parse_date_key(&item.date) else {
+                continue;
+            };
+            if d >= week_start && d <= week_end {
+                this_week_count += 1;
+            }
+            if is_same_month(d, viewed_month) {
+                month_count += 1;
+                if item.is_achievement {
+                    month_achievements += 1;
+                }
+            }
+        }
+
+        Self {
+            this_week_count,
+            month_count,
+            month_achievements,
+        }
+    }
 }
 
 pub struct WeeklyTrackerApp {
@@ -106,7 +157,7 @@ pub struct WeeklyTrackerApp {
 
 impl WeeklyTrackerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        icons::install_phosphor_font(&cc.egui_ctx);
+        icons::install_fonts(&cc.egui_ctx);
         let prefs = load_prefs();
         let theme = ThemeId::from_pref(&prefs.theme);
         apply_visuals(&cc.egui_ctx, theme);
@@ -184,6 +235,16 @@ impl WeeklyTrackerApp {
         self.form_description.clear();
         self.form_category = "development".into();
         self.form_achievement = false;
+    }
+
+    /// Jumps the calendar to the current month, pins today's date so pointer movement across the
+    /// calendar grid cannot shift selection on the way to the form, and opens the Add Work Item
+    /// form anchored on `today_local()`.
+    fn log_today(&mut self) {
+        let today = today_local();
+        self.month_offset = 0;
+        self.pinned_date = Some(today);
+        self.open_add_form(today);
     }
 
     fn open_edit_form(&mut self, item: &WorkItem) {
@@ -382,79 +443,99 @@ impl WeeklyTrackerApp {
         if !self.splash_active {
             return;
         }
+        let skip_key = ctx.input(|i| {
+            i.key_pressed(Key::Escape) || i.key_pressed(Key::Space) || i.key_pressed(Key::Enter)
+        });
         let elapsed = self.splash_started.elapsed();
-        if elapsed >= StdDuration::from_secs(5) {
+        if skip_key || elapsed >= StdDuration::from_millis(1000) {
             self.dismiss_splash(ctx);
             return;
         }
-        ctx.request_repaint_after(StdDuration::from_millis(80));
+        ctx.request_repaint_after(StdDuration::from_millis(16));
     }
 
+    /// Renders a calm, skippable ~1.0s architectural-neutral launch surface that fades cleanly
+    /// into the workspace without jarring full-screen gradients. Clicking anywhere or pressing
+    /// `Esc`, `Space`, or `Enter` dismisses it on the current frame.
     fn splash_overlay(&mut self, ctx: &egui::Context, palette: Palette) {
         let screen = ctx.input(|i| i.screen_rect);
-        let fade_start = StdDuration::from_millis(4200);
+        let fade_start = StdDuration::from_millis(650);
         let elapsed = self.splash_started.elapsed();
         let alpha = if elapsed >= fade_start {
-            let t = (elapsed - fade_start).as_secs_f32() / 0.8;
-            ((1.0 - t).clamp(0.0, 1.0) * 255.0) as u8
+            let t = (elapsed - fade_start).as_secs_f32() / 0.35;
+            (1.0 - t).clamp(0.0, 1.0)
         } else {
-            255
+            1.0
         };
 
         egui::Area::new(egui::Id::new("splash"))
             .order(Order::Foreground)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
-                let size = screen.size();
-                let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
                 if response.clicked() {
                     self.dismiss_splash(ctx);
                 }
-                let (top, bottom) = splash_gradient(palette);
-                let top_a = Color32::from_rgba_unmultiplied(top.r(), top.g(), top.b(), alpha);
-                let bottom_a = Color32::from_rgba_unmultiplied(bottom.r(), bottom.g(), bottom.b(), alpha);
-                paint_vertical_gradient_band(ui.painter(), rect, top_a, bottom_a);
+                let painter = ui.painter();
+                painter.rect_filled(rect, 0, palette.background.gamma_multiply(alpha));
 
-                let icon_center = rect.center() - Vec2::new(0.0, 48.0);
-                ui.painter().circle_stroke(
-                    icon_center,
-                    28.0,
-                    Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
+                let card_size = Vec2::new(320.0, 196.0);
+                let card_rect = egui::Rect::from_center_size(rect.center(), card_size);
+                painter.rect_filled(
+                    card_rect,
+                    CornerRadius::same(16),
+                    palette.surface.gamma_multiply(alpha),
                 );
-                ui.painter().line_segment(
-                    [
-                        icon_center,
-                        icon_center + Vec2::new(0.0, -14.0),
-                    ],
-                    Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
+                painter.rect_stroke(
+                    card_rect,
+                    CornerRadius::same(16),
+                    Stroke::new(1.0, palette.border.gamma_multiply(alpha)),
+                    StrokeKind::Inside,
                 );
-                ui.painter().line_segment(
-                    [
-                        icon_center,
-                        icon_center + Vec2::new(12.0, 8.0),
-                    ],
-                    Stroke::new(2.0, Color32::from_rgba_unmultiplied(255, 255, 255, alpha)),
+
+                let badge_rect = egui::Rect::from_center_size(
+                    card_rect.center() - Vec2::new(0.0, 42.0),
+                    Vec2::splat(44.0),
                 );
-                ui.painter().text(
-                    rect.center(),
+                painter.rect_filled(
+                    badge_rect,
+                    CornerRadius::same(11),
+                    palette.accent_soft.gamma_multiply(alpha),
+                );
+                painter.rect_stroke(
+                    badge_rect,
+                    CornerRadius::same(11),
+                    Stroke::new(1.0, palette.accent_soft_border.gamma_multiply(alpha)),
+                    StrokeKind::Inside,
+                );
+                painter.text(
+                    badge_rect.center(),
+                    Align2::CENTER_CENTER,
+                    TIMER,
+                    FontId::new(22.0, FontFamily::Proportional),
+                    palette.primary.gamma_multiply(alpha),
+                );
+
+                painter.text(
+                    card_rect.center() + Vec2::new(0.0, 6.0),
                     Align2::CENTER_CENTER,
                     APP_NAME,
-                    FontId::proportional(28.0),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+                    font_bold(20.0),
+                    palette.text.gamma_multiply(alpha),
                 );
-                ui.painter().text(
-                    rect.center() + Vec2::new(0.0, 36.0),
+                painter.text(
+                    card_rect.center() + Vec2::new(0.0, 32.0),
                     Align2::CENTER_CENTER,
                     APP_TAGLINE,
-                    FontId::proportional(16.0),
-                    Color32::from_rgba_unmultiplied(230, 240, 255, alpha),
+                    FontId::new(12.5, FontFamily::Proportional),
+                    palette.text_muted.gamma_multiply(alpha),
                 );
-                ui.painter().text(
-                    rect.center() + Vec2::new(0.0, 120.0),
+                painter.text(
+                    card_rect.center() + Vec2::new(0.0, 62.0),
                     Align2::CENTER_CENTER,
                     format!("v{APP_VERSION}"),
-                    FontId::proportional(12.0),
-                    Color32::from_rgba_unmultiplied(200, 220, 255, alpha),
+                    FontId::new(11.0, FontFamily::Proportional),
+                    palette.text_faint.gamma_multiply(alpha),
                 );
             });
     }
@@ -474,23 +555,39 @@ impl eframe::App for WeeklyTrackerApp {
             }
         }
 
-        egui::TopBottomPanel::top("toolbar")
-            .frame(toolbar_panel_frame(palette))
-            .show(ctx, |ui| {
-                self.toolbar(ui, palette);
-            });
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.copy_source_id.is_some() {
+                self.copy_source_id = None;
+            } else if self.show_export {
+                self.show_export = false;
+            } else if self.show_settings {
+                self.show_settings = false;
+            } else if self.form_mode.is_some() {
+                self.cancel_form();
+            }
+        }
 
         if let Some(banner) = self.update_banner.clone() {
             egui::TopBottomPanel::top("update_banner")
-                .frame(egui::Frame::NONE.fill(palette.cal_week_row))
+                .frame(
+                    Frame::new()
+                        .fill(palette.accent_soft)
+                        .inner_margin(Margin::symmetric(SPACE_MD as i8, 6))
+                        .stroke(Stroke::NONE),
+                )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("New release: {}", banner.title)).strong());
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            rich_bold(format!("Update available · {}", banner.title), 12.5)
+                                .color(palette.accent_soft_fg),
+                        );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Dismiss").clicked() {
+                            ui.spacing_mut().item_spacing.x = SPACE_XS;
+                            if ghost_button_compact(ui, palette, "Dismiss").clicked() {
                                 self.update_banner = None;
                             }
-                            if ui.button("Open in browser").clicked() {
+                            if primary_button_compact(ui, palette, "Open in browser").clicked() {
                                 Self::open_github(&banner.url);
                             }
                         });
@@ -498,39 +595,77 @@ impl eframe::App for WeeklyTrackerApp {
                 });
         }
 
-        egui::TopBottomPanel::bottom("footer")
-            .frame(
-                egui::Frame::NONE
-                    .fill(palette.background)
-                    .inner_margin(egui::Margin::symmetric(SPACE_MD as i8, SPACE_XS as i8)),
-            )
+        egui::TopBottomPanel::top("toolbar")
+            .frame(toolbar_panel_frame(palette))
             .show(ctx, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "© {} Biplab Sarkar · {}",
-                        today_local().year(),
-                        APP_LICENSE
-                    ))
-                    .small()
-                    .color(palette.text_muted),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("{APP_NAME} v{APP_VERSION}"))
-                            .small()
-                            .color(palette.text_muted),
-                    );
-                });
+                self.toolbar(ui, palette);
             });
-        });
+
+        egui::TopBottomPanel::bottom("footer")
+            .frame(Frame::new().fill(palette.background).inner_margin(Margin::ZERO))
+            .show(ctx, |ui| {
+                horizontal_divider(ui, palette.border);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_MD as i8, 5))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "© {} Biplab Sarkar · {}",
+                                    today_local().year(),
+                                    APP_LICENSE
+                                ))
+                                .size(11.0)
+                                .color(palette.text_muted),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format!("{APP_NAME} v{APP_VERSION}"))
+                                        .size(11.0)
+                                        .color(palette.text_faint),
+                                );
+                            });
+                        });
+                    });
+            });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(palette.background))
+            .frame(Frame::new().fill(palette.background).inner_margin(Margin::ZERO))
             .show(ctx, |ui| {
+                let screen_h = ctx.input(|i| i.screen_rect.height());
+                let compact_hero = screen_h < 620.0;
+                let ultra_short = screen_h < 540.0;
+                let hero_pad_v: i8 = if ultra_short {
+                    6
+                } else if compact_hero {
+                    8
+                } else {
+                    10
+                };
+                let cal_pad_v: i8 = if ultra_short {
+                    8
+                } else if compact_hero {
+                    10
+                } else {
+                    12
+                };
+
+                // Zero vertical auto-spacing between the Hero showcase band, the 1px blueprint
+                // seam, and the Calendar | Day Detail split so `ui.available_height()` gives the
+                // exact pixel budget remaining for all 4–6 calendar week rows.
+                ui.spacing_mut().item_spacing.y = 0.0;
+
+                Frame::new()
+                    .inner_margin(Margin::symmetric(12, hero_pad_v))
+                    .show(ui, |ui| {
+                        self.brand_hero(ui, palette, compact_hero);
+                    });
+
+                horizontal_divider(ui, palette.border);
+
                 let total_w = ui.available_width();
-                let total_h = ui.available_height();
+                let split_h = ui.available_height().max(0.0);
                 let cal_w = calendar_column_width(total_w, SPACE_MD);
                 let divider_w = 1.0;
                 let detail_w =
@@ -538,31 +673,44 @@ impl eframe::App for WeeklyTrackerApp {
 
                 ui.horizontal(|ui| {
                     ui.set_width(total_w);
-                    ui.spacing_mut().item_spacing.x = SPACE_MD;
+                    ui.spacing_mut().item_spacing.x = 0.0;
 
                     ui.allocate_ui_with_layout(
-                        Vec2::new(cal_w, total_h),
+                        Vec2::new(cal_w + SPACE_MD, split_h),
                         Layout::top_down(Align::LEFT),
                         |ui| {
-                            ui.set_width(cal_w);
-                            ui.set_min_height(total_h);
-                            self.month_calendar(ui, palette);
+                            Frame::new()
+                                .inner_margin(Margin {
+                                    left: 12,
+                                    right: 12,
+                                    top: cal_pad_v,
+                                    bottom: cal_pad_v,
+                                })
+                                .show(ui, |ui| {
+                                    let inner_w = (cal_w + SPACE_MD - 24.0).max(0.0);
+                                    let inner_h =
+                                        (split_h - (cal_pad_v as f32) * 2.0).max(0.0);
+                                    ui.set_width(inner_w);
+                                    ui.set_min_height(inner_h);
+                                    self.month_calendar(ui, palette, inner_h);
+                                });
                         },
                     );
 
                     let (div_rect, _) =
-                        ui.allocate_exact_size(Vec2::new(divider_w, total_h), Sense::hover());
+                        ui.allocate_exact_size(Vec2::new(divider_w, split_h), Sense::hover());
                     ui.painter().rect_filled(div_rect, 0, palette.border);
 
                     ui.allocate_ui_with_layout(
-                        Vec2::new(detail_w, total_h),
+                        Vec2::new(detail_w, split_h),
                         Layout::top_down(Align::LEFT),
                         |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                             ui.set_width(detail_w);
-                            ui.set_min_height(total_h);
+                            ui.set_min_height(split_h);
                             detail_column_frame(palette).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.set_min_height(total_h - SPACE_MD as f32 * 2.0);
+                                ui.set_min_height((split_h - SPACE_MD * 2.0).max(0.0));
                                 if self.form_mode.is_some() {
                                     self.item_form(ui, palette);
                                 } else {
@@ -587,302 +735,430 @@ impl eframe::App for WeeklyTrackerApp {
 }
 
 impl WeeklyTrackerApp {
+    /// Renders the compact ~45px top utility bar (`palette.surface` fill + `1px` bottom hairline)
+    /// dedicated to navigation and workspace controls (`< | Today | >` month scrubber, active
+    /// `Month Year`, dual-tone Theme picker, Settings icon, and Export button) so it pairs cleanly
+    /// with [`Self::brand_hero`] directly below without competing duplicate brand headers.
     fn toolbar(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let grid = get_month_grid(self.month_offset);
-        let bar = ui.max_rect();
-        let (top, bottom) = toolbar_gradient(palette);
-        paint_vertical_gradient_band(ui.painter(), bar, top, bottom);
+        let at_current_month = self.month_offset == 0 && self.pinned_date.is_none();
 
-        ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.x = SPACE_SM;
-        let divider_h = ui.available_height().max(28.0);
-        ui.horizontal(|ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                icon_label(TIMER, APP_NAME, 16.0, palette.toolbar_fg).strong(),
-            );
-            if toolbar_text_button(
-                ui,
-                palette,
-                icon_text(CARET_LEFT, 16.0, palette.toolbar_fg),
-            )
-            .on_hover_text("Previous month")
-            .clicked()
-            {
-                self.month_offset -= 1;
-            }
-            if toolbar_text_button(
-                ui,
-                palette,
-                icon_label(CALENDAR_BLANK, "Today", 14.0, palette.toolbar_fg),
-            )
-            .clicked()
-            {
-                self.month_offset = 0;
-                self.pinned_date = None;
-            }
-            if toolbar_text_button(
-                ui,
-                palette,
-                icon_text(CARET_RIGHT, 16.0, palette.toolbar_fg),
-            )
-            .on_hover_text("Next month")
-            .clicked()
-            {
-                self.month_offset += 1;
-            }
-            ui.add_space(SPACE_SM);
-            toolbar_divider(ui, divider_h);
-            ui.add_space(SPACE_SM);
-            ui.label(
-                RichText::new(format_month_year(grid.month))
-                    .size(18.0)
-                    .strong()
-                    .color(palette.toolbar_fg),
-            );
-
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = SPACE_SM;
-                if toolbar_action_button(
-                    ui,
-                    palette,
-                    icon_label(EXPORT, "Export", 14.0, palette.primary),
-                )
-                .clicked()
-                {
-                    self.show_export = true;
-                }
-                if toolbar_action_button(
-                    ui,
-                    palette,
-                    icon_label(GEAR, "Settings", 14.0, palette.primary),
-                )
-                .clicked()
-                {
-                    self.show_settings = true;
-                }
-
-                let theme_btn = toolbar_text_button(
-                    ui,
-                    palette,
-                    icon_label(PALETTE, "Theme", 14.0, palette.toolbar_fg),
-                );
-                let bar_id = ui.id().with("toolbar_theme_bar");
-                let mut bar_state = egui::menu::BarState::load(ui.ctx(), bar_id);
-                let _ = bar_state.bar_menu(&theme_btn, |ui| {
-                    for t in ThemeId::ALL {
-                        if ui
-                            .selectable_label(
-                                self.theme == t,
-                                format!("{} — {}", t.label(), t.description()),
-                            )
-                            .clicked()
-                        {
-                            self.set_theme(ui.ctx(), t);
-                            ui.close_menu();
-                        }
-                    }
-                });
-                bar_state.store(ui.ctx(), bar_id);
-            });
-        });
-    }
-
-    fn month_calendar(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        let grid = get_month_grid(self.month_offset);
-        let counts = self.item_counts();
-        let achievements = self.achievement_dates();
-        let radius = CornerRadius::same(6);
-        let cell_gap = SPACE_SM;
-        let col_w = ui.available_width();
-        // "Calendar" title, weekday header row, and spacing above the bordered week grid.
-        let header_reserve = 20.0 + SPACE_SM + 20.0 + SPACE_SM;
-        let scroll_h = (ui.available_height() - header_reserve).max(0.0);
-        let day_cell = cal_day_cell_for_layout(col_w, grid.weeks.len(), scroll_h);
-        let grid_content_h = cal_month_grid_content_height(grid.weeks.len(), day_cell);
-        let scroll_max_h = grid_content_h.min(scroll_h);
-
-        ui.label(
-            RichText::new("Calendar")
-                .small()
-                .strong()
-                .color(palette.text_muted),
-        );
-        ui.add_space(SPACE_SM);
-
-        egui::Grid::new("cal_header")
-            .num_columns(8)
-            .spacing([cell_gap, cell_gap])
+        Frame::new()
+            .inner_margin(Margin::symmetric(SPACE_MD as i8, 6))
             .show(ui, |ui| {
-                let labels: Vec<&str> = std::iter::once("Wk")
-                    .chain(iso_weekday_labels())
-                    .collect();
-                for (i, label) in labels.iter().enumerate() {
-                    let width = if i == 0 {
-                        CAL_WEEK_COL_WIDTH
-                    } else {
-                        day_cell.x
-                    };
-                    let size = Vec2::new(width, 20.0);
-                    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-                    if i == 0 {
-                        paint_week_column_cell(
-                            ui.painter(),
-                            rect,
-                            radius,
-                            palette,
-                            false,
-                            label,
-                        );
-                    } else {
-                        ui.painter().text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            *label,
-                            FontId::proportional(11.0),
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+
+                    Frame::new()
+                        .fill(palette.surface_muted)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(CornerRadius::same(8))
+                        .inner_margin(Margin::same(2))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            if scrubber_icon_button(ui, palette, CARET_LEFT, "Previous month")
+                                .clicked()
+                            {
+                                self.month_offset -= 1;
+                            }
+                            if scrubber_today_button(ui, palette, at_current_month).clicked() {
+                                self.month_offset = 0;
+                                self.pinned_date = None;
+                            }
+                            if scrubber_icon_button(ui, palette, CARET_RIGHT, "Next month")
+                                .clicked()
+                            {
+                                self.month_offset += 1;
+                            }
+                        });
+
+                    ui.add_space(SPACE_XS);
+                    ui.label(rich_bold(format_month_year(grid.month), 15.5).color(palette.text));
+                    if self.month_offset == 0 {
+                        status_pill(
+                            ui,
+                            palette.surface_muted,
+                            palette.border,
                             palette.text_muted,
+                            &format!("W{}", today_local().iso_week().week()),
                         );
                     }
-                }
-                ui.end_row();
-            });
 
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .max_height(scroll_max_h)
-            .show(ui, |ui| {
-            ui.set_width(col_w);
-            calendar_outer_frame(palette).show(ui, |ui| {
-                ui.set_width((col_w - SPACE_SM * 2.0).max(0.0));
-                ui.spacing_mut().item_spacing = Vec2::new(cell_gap, cell_gap);
-                for week in &grid.weeks {
-                    let current_week = week.days.iter().any(|&d| is_in_current_week(d));
-                    ui.horizontal(|ui| {
-                        let wk_size = Vec2::new(CAL_WEEK_COL_WIDTH, day_cell.y);
-                        let (wk_rect, _) = ui.allocate_exact_size(wk_size, Sense::hover());
-                        paint_week_column_cell(
-                            ui.painter(),
-                            wk_rect,
-                            radius,
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                        if secondary_button(
+                            ui,
                             palette,
-                            current_week,
-                            &format!("{}", week.week_number),
-                        );
+                            icon_label(EXPORT, "Export", 13.0, palette.text),
+                        )
+                        .on_hover_text("Export markdown report")
+                        .clicked()
+                        {
+                            self.show_export = true;
+                        }
 
-                            for &date in &week.days {
-                                let key = format_date_key(date);
-                                let in_month = is_same_month(date, grid.month);
-                                let today = is_today(date);
-                                let focused = self.pinned_date == Some(date);
-                                let hovered = self.hover_date == Some(date);
-                                let count = counts.get(&key).copied().unwrap_or(0);
-                                let has_ach = achievements.contains(&key);
+                        if ghost_icon_button(ui, palette, GEAR, 16.5, "Settings").clicked() {
+                            self.show_settings = true;
+                        }
 
-                                let (rect, response) =
-                                    ui.allocate_exact_size(day_cell, Sense::click());
+                        vertical_divider(ui, 18.0, palette.divider);
 
-                                let mut bg = if in_month {
-                                    palette.surface
-                                } else {
-                                    palette.cal_cell_out_bg
-                                };
-                                if current_week && !focused && !hovered && !today {
-                                    bg = palette.cal_week_row;
-                                }
-                                if focused {
-                                    bg = palette.cal_focus;
-                                } else if hovered {
-                                    bg = palette.cal_hover;
-                                } else if today && !focused {
-                                    bg = palette.cal_today;
-                                }
-
-                                ui.painter().rect_filled(rect, radius, bg);
-                                if focused {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        radius,
-                                        Stroke::new(2.0, palette.primary),
-                                        StrokeKind::Inside,
-                                    );
-                                }
-
-                                let day_color = if in_month {
-                                    palette.cal_cell_in_text
-                                } else {
-                                    palette.cal_cell_out_text
-                                };
-                                let mut day_center = rect.center();
-                                if count > 0 || has_ach {
-                                    day_center.y -= 4.0;
-                                }
-                                if today {
-                                    ui.painter().circle_filled(
-                                        day_center,
-                                        11.0,
-                                        palette.cal_day_today_bg,
-                                    );
-                                }
-                                ui.painter().text(
-                                    day_center,
-                                    Align2::CENTER_CENTER,
-                                    format!("{}", date.day()),
-                                    FontId::proportional(13.0),
-                                    if today {
-                                        palette.cal_day_today_fg
-                                    } else {
-                                        day_color
-                                    },
-                                );
-
-                                if count > 0 || has_ach {
-                                    let dot_color = if count >= 3 {
-                                        palette.cal_dot_3
-                                    } else if count >= 2 {
-                                        palette.cal_dot_2
-                                    } else {
-                                        palette.cal_dot_1
-                                    };
-                                    ui.painter().circle_filled(
-                                        rect.center() + Vec2::new(-4.0, 14.0),
-                                        3.0,
-                                        dot_color,
-                                    );
-                                    if has_ach {
-                                        ui.painter().circle_filled(
-                                            rect.center() + Vec2::new(6.0, 14.0),
-                                            2.5,
-                                            palette.achievement,
-                                        );
-                                    }
-                                    if count > 1 {
-                                        ui.painter().text(
-                                            rect.center() + Vec2::new(14.0, 14.0),
-                                            Align2::CENTER_CENTER,
-                                            format!("{count}"),
-                                            FontId::proportional(8.0),
-                                            palette.text_muted,
-                                        );
-                                    }
-                                }
-
-                                if response.hovered() {
-                                    self.hover_date = Some(date);
-                                }
-                                if response.clicked() {
-                                    self.pinned_date = if self.pinned_date == Some(date) {
-                                        None
-                                    } else {
-                                        Some(date)
-                                    };
+                        let theme_btn = theme_swatch_button(ui, palette, self.theme);
+                        let bar_id = ui.id().with("toolbar_theme_bar");
+                        let mut bar_state = egui::menu::BarState::load(ui.ctx(), bar_id);
+                        let _ = bar_state.bar_menu(&theme_btn, |ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            for t in ThemeId::ALL {
+                                if theme_menu_row(ui, palette, t, self.theme == t).clicked() {
+                                    self.set_theme(ui.ctx(), t);
+                                    ui.close_menu();
                                 }
                             }
                         });
-                    }
+                        bar_state.store(ui.ctx(), bar_id);
+                    });
+                });
+            });
+
+        horizontal_divider(ui, palette.border);
+    }
+
+    /// Renders the brand-themed Hero Banner (`Time Tracker — Track your work. Celebrate your wins.`)
+    /// with live ISO-week, viewed-month, and achievement telemetry pills plus the `+ Log Today`
+    /// one-click CTA.
+    fn brand_hero(&mut self, ui: &mut egui::Ui, palette: Palette, compact_height: bool) {
+        let today = today_local();
+        let grid = get_month_grid(self.month_offset);
+        let metrics = HeroMetrics::compute(&self.items, grid.month, today);
+        let wide_banner = ui.available_width() >= 920.0;
+
+        let month_label = if grid.month.year() != today.year() {
+            grid.month.format("%b '%y").to_string()
+        } else if wide_banner {
+            grid.month.format("%B").to_string()
+        } else {
+            grid.month.format("%b").to_string()
+        };
+
+        let viewing_context = match self.pinned_date {
+            Some(pinned) => format!(
+                "Viewing {}  ·  Pinned {}",
+                format_month_year(grid.month),
+                pinned.format("%b %-d")
+            ),
+            None => format!(
+                "Viewing {}  ·  ISO Week {}",
+                format_month_year(grid.month),
+                today.iso_week().week()
+            ),
+        };
+
+        if paint_brand_hero_banner(
+            ui,
+            palette,
+            self.theme,
+            HeroContent {
+                app_name: APP_NAME,
+                tagline: APP_TAGLINE,
+                viewing_context: &viewing_context,
+                this_week_count: metrics.this_week_count,
+                month_label: &month_label,
+                month_count: metrics.month_count,
+                month_achievements: metrics.month_achievements,
+            },
+            compact_height,
+        ) {
+            self.log_today();
+        }
+    }
+
+    /// Renders the left-hand architectural month calendar card inside `card_max_h` vertical space.
+    ///
+    /// Protects two layout invariants:
+    /// 1. Sizes day cells via [`cal_day_cell_for_layout`] against `card_max_h` minus card margins
+    ///    and header height so all 4–6 ISO week rows remain simultaneously visible without vertical
+    ///    clipping across standard desktop heights (`>= MIN_WINDOW_HEIGHT`).
+    /// 2. Applies identical `SPACE_SM` horizontal margins to both the `Wk / Mo..Su` header strip
+    ///    and [`calendar_outer_frame`] so weekday captions align pixel-for-pixel with day columns.
+    fn month_calendar(&mut self, ui: &mut egui::Ui, palette: Palette, card_max_h: f32) {
+        let grid = get_month_grid(self.month_offset);
+        let counts = self.item_counts();
+        let achievements = self.achievement_dates();
+        let radius = CornerRadius::same(7);
+        let cell_gap = SPACE_SM;
+
+        let month_total: usize = grid
+            .weeks
+            .iter()
+            .flat_map(|w| w.days.iter())
+            .filter(|&&d| is_same_month(d, grid.month))
+            .map(|d| counts.get(&format_date_key(*d)).copied().unwrap_or(0))
+            .sum();
+
+        calendar_card_frame(palette).show(ui, |ui| {
+            let col_w = ui.available_width();
+            // `calendar_card_frame` has 10px top + 10px bottom inner margin = 20px total.
+            let inner_avail_h = (card_max_h - 20.0).max(0.0);
+            // Title row (20px) + 6px gap + weekday strip (22px) + 2px gap = 50px fixed header.
+            let header_reserve = 50.0;
+            let scroll_h = (inner_avail_h - header_reserve).max(0.0);
+            let day_cell = cal_day_cell_for_layout(col_w, grid.weeks.len(), scroll_h);
+            let grid_content_h = cal_month_grid_content_height(grid.weeks.len(), day_cell);
+            let scroll_max_h = grid_content_h.min(scroll_h);
+
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            ui.allocate_ui_with_layout(
+                Vec2::new(col_w, 20.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_width(col_w);
+                    Frame::new()
+                        .inner_margin(Margin::symmetric(SPACE_SM as i8, 0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(rich_bold("Calendar", 12.0).color(palette.text_muted));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let summary = if month_total == 1 {
+                                        "1 entry this month".to_string()
+                                    } else {
+                                        format!("{month_total} entries this month")
+                                    };
+                                    ui.label(
+                                        RichText::new(summary).size(11.0).color(palette.text_faint),
+                                    );
+                                });
+                            });
+                        });
+                },
+            );
+
+            ui.add_space(6.0);
+
+            // Match `calendar_outer_frame`'s horizontal `SPACE_SM` inset so `Wk` and all 7
+            // weekday labels align column-for-column with the week rows below.
+            Frame::new()
+                .inner_margin(Margin::symmetric(SPACE_SM as i8, 0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = cell_gap;
+                        let (wk_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(CAL_WEEK_COL_WIDTH, 22.0), Sense::hover());
+                        paint_week_column_cell(
+                            ui.painter(),
+                            wk_rect,
+                            CornerRadius::same(5),
+                            palette,
+                            false,
+                            "Wk",
+                        );
+                        for label in iso_weekday_labels() {
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::new(day_cell.x, 22.0), Sense::hover());
+                            ui.painter().text(
+                                rect.center(),
+                                Align2::CENTER_CENTER,
+                                label,
+                                font_bold(11.0),
+                                palette.text_muted,
+                            );
+                        }
+                    });
+                });
+
+            ui.add_space(2.0);
+
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(scroll_max_h)
+                .show(ui, |ui| {
+                    ui.set_width(col_w);
+                    calendar_outer_frame(palette).show(ui, |ui| {
+                        ui.set_width((col_w - SPACE_SM * 2.0).max(0.0));
+                        ui.spacing_mut().item_spacing = Vec2::new(cell_gap, cell_gap);
+                        for week in &grid.weeks {
+                            let current_week = week.days.iter().any(|&d| is_in_current_week(d));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = cell_gap;
+                                let wk_size = Vec2::new(CAL_WEEK_COL_WIDTH, day_cell.y);
+                                let (wk_rect, _) =
+                                    ui.allocate_exact_size(wk_size, Sense::hover());
+                                paint_week_column_cell(
+                                    ui.painter(),
+                                    wk_rect,
+                                    radius,
+                                    palette,
+                                    current_week,
+                                    &format!("{}", week.week_number),
+                                );
+
+                                for &date in &week.days {
+                                    let key = format_date_key(date);
+                                    let in_month = is_same_month(date, grid.month);
+                                    let today = is_today(date);
+                                    let focused = self.pinned_date == Some(date);
+                                    let cell_resp =
+                                        ui.allocate_exact_size(day_cell, Sense::click());
+                                    let (rect, response) = cell_resp;
+                                    let ptr_hover = response.hovered();
+                                    if ptr_hover {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    // Keep the unpinned hover-selected day subtly tinted even after
+                                    // the pointer moves into the right-hand Day Detail pane so the
+                                    // calendar visually echoes `self.display_date()`.
+                                    let inspected_hover = ptr_hover
+                                        || (self.pinned_date.is_none()
+                                            && self.hover_date == Some(date));
+
+                                    let mut bg = if focused {
+                                        palette.cal_focus_bg
+                                    } else if inspected_hover {
+                                        palette.cal_hover_bg
+                                    } else if today {
+                                        palette.cal_today_bg
+                                    } else if current_week && in_month {
+                                        palette.cal_week_row
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    };
+                                    if !in_month && !focused && !inspected_hover && !today {
+                                        bg = Color32::TRANSPARENT;
+                                    }
+
+                                    if bg != Color32::TRANSPARENT {
+                                        ui.painter().rect_filled(rect, radius, bg);
+                                    }
+                                    if focused {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            radius,
+                                            Stroke::new(1.5, palette.primary),
+                                            StrokeKind::Inside,
+                                        );
+                                    } else if today {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            radius,
+                                            Stroke::new(1.0, palette.accent_soft_border),
+                                            StrokeKind::Inside,
+                                        );
+                                    } else if inspected_hover {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            radius,
+                                            Stroke::new(1.0, palette.border),
+                                            StrokeKind::Inside,
+                                        );
+                                    }
+
+                                    let count = counts.get(&key).copied().unwrap_or(0);
+                                    let has_ach = achievements.contains(&key);
+                                    let roomy = day_cell.y >= 38.0;
+
+                                    let mut day_center = rect.center();
+                                    if roomy && (count > 0 || has_ach) {
+                                        day_center.y -= 4.0;
+                                    }
+
+                                    if today {
+                                        let badge_r = if roomy { 11.0 } else { 9.5 };
+                                        ui.painter().circle_filled(
+                                            day_center,
+                                            badge_r,
+                                            palette.cal_today_badge_bg,
+                                        );
+                                    }
+
+                                    let day_font = if today || focused {
+                                        font_bold(12.5)
+                                    } else {
+                                        FontId::new(12.5, FontFamily::Proportional)
+                                    };
+                                    let day_fg = if today {
+                                        palette.cal_today_badge_fg
+                                    } else if focused {
+                                        palette.accent_soft_fg
+                                    } else if in_month {
+                                        palette.text
+                                    } else {
+                                        palette.text_faint
+                                    };
+                                    ui.painter().text(
+                                        day_center,
+                                        Align2::CENTER_CENTER,
+                                        format!("{}", date.day()),
+                                        day_font,
+                                        day_fg,
+                                    );
+
+                                    if count > 0 || has_ach {
+                                        if roomy {
+                                            let indicator_y = rect.bottom() - 6.5;
+                                            let dots_shown = count.min(3);
+                                            let total_dots =
+                                                dots_shown + usize::from(has_ach);
+                                            let spacing = 6.0;
+                                            let start_x = rect.center().x
+                                                - (total_dots.saturating_sub(1) as f32 * spacing)
+                                                    * 0.5;
+                                            for idx in 0..dots_shown {
+                                                ui.painter().circle_filled(
+                                                    Pos2::new(
+                                                        start_x + idx as f32 * spacing,
+                                                        indicator_y,
+                                                    ),
+                                                    2.3,
+                                                    palette.cal_dot,
+                                                );
+                                            }
+                                            if has_ach {
+                                                ui.painter().circle_filled(
+                                                    Pos2::new(
+                                                        start_x + dots_shown as f32 * spacing,
+                                                        indicator_y,
+                                                    ),
+                                                    2.5,
+                                                    palette.achievement_fg,
+                                                );
+                                            }
+                                        } else {
+                                            let dot_pos =
+                                                Pos2::new(rect.right() - 5.0, rect.bottom() - 5.0);
+                                            let dot_col = if has_ach {
+                                                palette.achievement_fg
+                                            } else {
+                                                palette.cal_dot
+                                            };
+                                            ui.painter().circle_filled(dot_pos, 2.2, dot_col);
+                                        }
+                                    }
+
+                                    if ptr_hover {
+                                        self.hover_date = Some(date);
+                                    }
+                                    if response.clicked() {
+                                        self.pinned_date = if self.pinned_date == Some(date) {
+                                            None
+                                        } else {
+                                            Some(date)
+                                        };
+                                    }
+                                }
+                            });
+                        }
+                    });
                 });
         });
     }
 
+    /// Renders the editorial right-hand Day Detail view for [`Self::display_date`], including
+    /// status pills (`Today`, `Pinned`), `Pin` toggle, `+ Add Item` CTA, calm empty state,
+    /// clickable work-item cards with quiet `Copy`/`Edit`/`Delete` icon actions, and the bottom
+    /// dashed `+ Add another item` bar.
     fn day_detail(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let date = self.display_date();
         let day_items: Vec<WorkItem> = items_for_day(&self.items, date)
@@ -891,223 +1167,420 @@ impl WeeklyTrackerApp {
             .collect();
         let today = is_today(date);
         let pinned = self.pinned_date == Some(date);
+        let achievement_count = day_items.iter().filter(|i| i.is_achievement).count();
 
-        let header_h = 58.0;
-        let header_w = ui.available_width();
-        let (header_rect, _) = ui.allocate_exact_size(Vec2::new(header_w, header_h), Sense::hover());
-        if today {
-            paint_vertical_gradient_band(
-                ui.painter(),
-                header_rect,
-                palette.day_header_today_start,
-                palette.day_header_today_end,
-            );
-        } else {
-            ui.painter()
-                .rect_filled(header_rect, CornerRadius::same(0), palette.surface);
-        }
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(header_rect), |ui| {
-            ui.add_space(SPACE_SM);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.heading(
-                        RichText::new(format_day_full(date))
-                            .color(if today {
-                                Color32::WHITE
-                            } else {
-                                palette.text
-                            }),
-                    );
-                    ui.label(
-                        RichText::new(format!(
-                            "{} {}",
-                            day_items.len(),
-                            if day_items.len() == 1 {
-                                "item"
-                            } else {
-                                "items"
-                            }
-                        ))
-                        .small()
-                        .color(if today {
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 220)
-                        } else {
-                            palette.text_muted
-                        }),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let pin_icon = if pinned { PUSH_PIN_SLASH } else { PUSH_PIN };
-                    let pin_label = if pinned { "Unpin" } else { "Pin day" };
-                    let pin_fg = if today {
-                        Color32::WHITE
-                    } else {
-                        palette.primary
-                    };
-                    let pin_fill = if today {
-                        Color32::from_rgba_unmultiplied(255, 255, 255, 40)
-                    } else {
-                        palette.cal_hover
-                    };
-                    if pill_button(
-                        ui,
-                        icon_label(pin_icon, pin_label, 14.0, pin_fg),
-                        pin_fill,
-                        pin_fg,
-                        Stroke::new(1.0, if today { pin_fill } else { palette.border }),
-                    )
-                    .clicked()
-                    {
-                        self.pinned_date = if pinned { None } else { Some(date) };
+        ui.horizontal(|ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_SM;
+                    ui.label(rich_bold(format_day_full(date), 18.0).color(palette.text));
+                    if today {
+                        status_pill(
+                            ui,
+                            palette.accent_soft,
+                            palette.accent_soft_border,
+                            palette.accent_soft_fg,
+                            "Today",
+                        );
                     }
-                    if primary_button(
-                        ui,
-                        palette,
-                        icon_label(PLUS, "Add", 14.0, Color32::WHITE),
-                    )
-                    .clicked()
-                    {
-                        self.open_add_form(date);
+                    if pinned {
+                        status_pill(
+                            ui,
+                            palette.surface_muted,
+                            palette.border_strong,
+                            palette.text_muted,
+                            "Pinned",
+                        );
                     }
                 });
+                ui.add_space(2.0);
+                let item_word = if day_items.len() == 1 {
+                    "item"
+                } else {
+                    "items"
+                };
+                let subtitle = if achievement_count > 0 {
+                    let ach_word = if achievement_count == 1 {
+                        "achievement"
+                    } else {
+                        "achievements"
+                    };
+                    format!(
+                        "{} {item_word} · {achievement_count} {ach_word}",
+                        day_items.len()
+                    )
+                } else {
+                    format!("{} {item_word} logged", day_items.len())
+                };
+                ui.label(RichText::new(subtitle).size(12.5).color(palette.text_muted));
             });
-        });
-        ui.add_space(SPACE_SM);
-        ui.separator();
 
-        if day_items.is_empty() {
-            let pane_h = ui.available_height().max(160.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), pane_h),
-                Layout::top_down(Align::Center),
-                |ui| {
-                    ui.add_space(pane_h * 0.18);
-                    ui.label(RichText::new("No items for this day").color(palette.text_muted));
-                    ui.add_space(SPACE_SM);
-                    if primary_button(
-                        ui,
-                        palette,
-                        icon_label(PLUS, "Add Work Item", 14.0, Color32::WHITE),
-                    )
-                    .clicked()
-                    {
-                        self.open_add_form(date);
-                    }
-                },
-            );
-        } else {
-            ScrollArea::vertical().show(ui, |ui| {
-                for item in &day_items {
-                    let id = item.id.clone();
-                    card_frame(palette).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if item.is_achievement {
-                                achievement_indicator(ui, palette);
-                            }
-                            ui.vertical(|ui| {
-                                ui.strong(&item.title);
-                                if !item.description.is_empty() {
-                                    ui.label(
-                                        RichText::new(&item.description).color(palette.text_muted),
-                                    );
-                                }
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(category_label(&item.category))
-                                            .small()
-                                            .color(palette.accent),
-                                    );
-                                    ui.label(
-                                        RichText::new(format_local_time(item.updated_at))
-                                            .small()
-                                            .color(palette.text_muted),
-                                    );
-                                });
-                            });
-                            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
-                                if icons::small_icon_button(ui, palette, COPY, "Copy to another day")
-                                    .clicked()
-                                {
-                                    self.copy_source_id = Some(id.clone());
-                                    if let Some(d) = parse_date_key(&item.date) {
-                                        self.copy_target_date =
-                                            format_date_key(d + Duration::days(1));
-                                    }
-                                }
-                                if icons::small_icon_button(ui, palette, TRASH, "Delete").clicked() {
-                                    self.delete_item(&id);
-                                }
-                                if icons::small_icon_button(ui, palette, PENCIL, "Edit").clicked() {
-                                    if let Some(full) =
-                                        self.items.iter().find(|i| i.id == id).cloned()
-                                    {
-                                        self.open_edit_form(&full);
-                                    }
-                                }
-                            });
-                        });
-                    });
-                    ui.add_space(SPACE_SM);
-                }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_SM;
                 if primary_button(
                     ui,
                     palette,
-                    icon_label(PLUS, "Add Work Item", 14.0, Color32::WHITE),
+                    icon_label_bold(PLUS, "Add Item", 13.0, palette.on_primary),
                 )
+                .on_hover_text("Log a work item for this day")
                 .clicked()
                 {
                     self.open_add_form(date);
                 }
+
+                let pin_icon = if pinned { PUSH_PIN_SLASH } else { PUSH_PIN };
+                let pin_tooltip = if pinned {
+                    "Unpin day (follow calendar hover)"
+                } else {
+                    "Pin this day while browsing calendar"
+                };
+                if toggle_icon_button(ui, palette, pin_icon, pinned, pin_tooltip).clicked() {
+                    self.pinned_date = if pinned { None } else { Some(date) };
+                }
             });
+        });
+
+        ui.add_space(12.0);
+        horizontal_divider(ui, palette.divider);
+        ui.add_space(SPACE_MD);
+
+        if day_items.is_empty() {
+            let avail_h = ui.available_height().max(180.0);
+            Frame::new()
+                .fill(palette.background)
+                .stroke(Stroke::new(1.0, palette.border))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(Margin::symmetric(SPACE_LG as i8, SPACE_LG as i8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let inner_h = (avail_h - SPACE_LG * 2.0 - 8.0).max(132.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), inner_h),
+                        Layout::top_down(Align::Center),
+                        |ui| {
+                            ui.add_space((inner_h * 0.16).max(8.0));
+                            let (icon_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                icon_rect,
+                                CornerRadius::same(10),
+                                palette.surface,
+                            );
+                            ui.painter().rect_stroke(
+                                icon_rect,
+                                CornerRadius::same(10),
+                                Stroke::new(1.0, palette.border),
+                                StrokeKind::Inside,
+                            );
+                            ui.painter().text(
+                                icon_rect.center(),
+                                Align2::CENTER_CENTER,
+                                CALENDAR_BLANK,
+                                FontId::new(20.0, FontFamily::Proportional),
+                                palette.text_muted,
+                            );
+
+                            ui.add_space(12.0);
+                            ui.label(
+                                rich_bold("No items logged for this day", 14.0)
+                                    .color(palette.text),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "Capture engineering progress, reviews, meetings, or key wins.",
+                                )
+                                .size(12.5)
+                                .color(palette.text_muted),
+                            );
+                            ui.add_space(SPACE_MD);
+                            if soft_accent_button(
+                                ui,
+                                palette,
+                                icon_label_bold(PLUS, "Add Work Item", 13.0, palette.accent_soft_fg),
+                            )
+                            .clicked()
+                            {
+                                self.open_add_form(date);
+                            }
+                        },
+                    );
+                });
+        } else {
+            ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut pending_edit: Option<WorkItem> = None;
+                    let mut pending_delete: Option<String> = None;
+
+                    for item in &day_items {
+                        let id = item.id.clone();
+                        let inner = card_frame(palette).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let mut action_interacted = false;
+
+                            ui.horizontal(|ui| {
+                                ui.set_width(ui.available_width());
+                                let actions_reserve = 3.0 * 28.0 + 2.0 * 4.0 + SPACE_MD;
+                                let text_w = (ui.available_width() - actions_reserve).max(100.0);
+
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(text_w, 0.0),
+                                    Layout::top_down(Align::LEFT),
+                                    |ui| {
+                                        ui.label(rich_bold(&item.title, 14.0).color(palette.text));
+                                        if !item.description.is_empty() {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new(&item.description)
+                                                    .size(12.5)
+                                                    .color(palette.text_muted),
+                                            );
+                                        }
+                                        ui.add_space(SPACE_SM);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            category_pill(
+                                                ui,
+                                                &item.category,
+                                                category_label(&item.category),
+                                                palette.is_dark,
+                                            );
+                                            if item.is_achievement {
+                                                let _ = achievement_badge(ui, palette);
+                                            }
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "· {}",
+                                                    format_local_time(item.updated_at)
+                                                ))
+                                                .size(11.5)
+                                                .color(palette.text_faint),
+                                            );
+                                        });
+                                    },
+                                );
+
+                                ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.0;
+
+                                    let del_resp = icons::small_danger_icon_button(
+                                        ui,
+                                        palette,
+                                        TRASH,
+                                        "Delete item",
+                                    );
+                                    if del_resp.hovered() || del_resp.clicked() {
+                                        action_interacted = true;
+                                    }
+                                    if del_resp.clicked() {
+                                        pending_delete = Some(id.clone());
+                                    }
+
+                                    let edit_resp = icons::small_icon_button(
+                                        ui,
+                                        palette,
+                                        PENCIL,
+                                        "Edit item",
+                                    );
+                                    if edit_resp.hovered() || edit_resp.clicked() {
+                                        action_interacted = true;
+                                    }
+                                    if edit_resp.clicked() {
+                                        pending_edit = Some(item.clone());
+                                    }
+
+                                    let copy_resp = icons::small_icon_button(
+                                        ui,
+                                        palette,
+                                        COPY,
+                                        "Copy to another day",
+                                    );
+                                    if copy_resp.hovered() || copy_resp.clicked() {
+                                        action_interacted = true;
+                                    }
+                                    if copy_resp.clicked() {
+                                        self.copy_source_id = Some(id.clone());
+                                        if let Some(d) = parse_date_key(&item.date) {
+                                            self.copy_target_date =
+                                                format_date_key(d + Duration::days(1));
+                                        }
+                                    }
+                                });
+                            });
+
+                            action_interacted
+                        });
+
+                        let card_rect = inner.response.rect;
+                        let action_interacted = inner.inner;
+                        let card_hover =
+                            ui.interact(card_rect, ui.id().with(("day_card", &id)), Sense::hover());
+                        if card_hover.hovered() {
+                            if !action_interacted {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            ui.painter().rect_stroke(
+                                card_rect,
+                                CornerRadius::same(CARD_RADIUS),
+                                Stroke::new(1.0, palette.border_strong),
+                                StrokeKind::Inside,
+                            );
+                        }
+                        let card_clicked = card_hover.hovered()
+                            && !action_interacted
+                            && ui.input(|i| {
+                                i.pointer.primary_clicked()
+                                    && i.pointer
+                                        .press_origin()
+                                        .is_some_and(|origin| card_rect.contains(origin))
+                            });
+                        if card_clicked {
+                            pending_edit = Some(item.clone());
+                        }
+
+                        ui.add_space(SPACE_SM);
+                    }
+
+                    if let Some(id) = pending_delete {
+                        self.delete_item(&id);
+                    } else if let Some(edit_item) = pending_edit {
+                        self.open_edit_form(&edit_item);
+                    }
+
+                    ui.add_space(SPACE_XS);
+                    if dashed_add_bar_button(
+                        ui,
+                        palette,
+                        icon_label_bold(PLUS, "Add another item", 12.5, palette.text_muted),
+                    )
+                    .clicked()
+                    {
+                        self.open_add_form(date);
+                    }
+                });
         }
     }
 
+    /// Renders the inline Add / Edit work-item form inside the right detail column with category
+    /// selector, gold achievement toggle chip, focus-ring inputs, `Enter`-to-submit on title, and
+    /// `Esc` / `X` cancellation.
     fn item_form(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let heading = match self.form_mode {
             Some(FormMode::Add) => "Add Work Item",
             Some(FormMode::Edit) => "Edit Work Item",
             None => "Work Item",
         };
-        ui.heading(heading);
-        if let Some(d) = self.form_date {
-            ui.label(
-                RichText::new(format_day_full(d))
-                    .small()
-                    .color(palette.text_muted),
-            );
+
+        let mut close_clicked = false;
+        ui.horizontal(|ui| {
+            ui.set_width(ui.available_width());
+            ui.vertical(|ui| {
+                ui.label(rich_bold(heading, 18.0).color(palette.text));
+                if let Some(d) = self.form_date {
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(format_day_full(d))
+                            .size(12.5)
+                            .color(palette.text_muted),
+                    );
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                if ghost_icon_button(ui, palette, crate::ui::icons::X, 15.0, "Cancel (Esc)")
+                    .clicked()
+                {
+                    close_clicked = true;
+                }
+            });
+        });
+        if close_clicked {
+            self.cancel_form();
+            return;
         }
 
-        ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        horizontal_divider(ui, palette.divider);
+        ui.add_space(SPACE_MD);
+
+        ui.label(rich_bold("Category & Impact", 12.0).color(palette.text_muted));
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
             egui::ComboBox::from_id_salt("category")
-                .selected_text(category_label(&self.form_category))
+                .height(240.0)
+                .selected_text(
+                    RichText::new(category_label(&self.form_category))
+                        .size(13.0)
+                        .color(palette.text),
+                )
                 .show_ui(ui, |ui| {
                     for cat in CATEGORIES {
-                        ui.selectable_value(&mut self.form_category, cat.id.to_string(), cat.label);
+                        ui.selectable_value(
+                            &mut self.form_category,
+                            cat.id.to_string(),
+                            cat.label,
+                        );
                     }
                 });
-            ui.checkbox(&mut self.form_achievement, "Mark as Achievement");
+            achievement_toggle_chip(ui, palette, &mut self.form_achievement);
         });
 
-        ui.label("Title");
-        ui.text_edit_singleline(&mut self.form_title);
-        ui.label("Details (optional)");
-        ui.text_edit_multiline(&mut self.form_description);
+        ui.add_space(SPACE_MD);
+        ui.label(rich_bold("Title", 12.0).color(palette.text_muted));
+        ui.add_space(6.0);
+        let title_resp = styled_singleline_input(
+            ui,
+            palette,
+            &mut self.form_title,
+            "What did you ship, review, or advance?",
+        );
+
+        ui.add_space(SPACE_MD);
+        ui.horizontal(|ui| {
+            ui.label(rich_bold("Details", 12.0).color(palette.text_muted));
+            ui.label(RichText::new("(optional)").size(11.5).color(palette.text_faint));
+        });
+        ui.add_space(6.0);
+        styled_multiline_input(
+            ui,
+            palette,
+            &mut self.form_description,
+            5,
+            "Notes, PR links, design decisions, or measurable impact…",
+        );
+
+        ui.add_space(SPACE_LG);
+        horizontal_divider(ui, palette.divider);
+        ui.add_space(12.0);
+
+        let can_save = !self.form_title.trim().is_empty();
+        if title_resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && can_save {
+            self.submit_form();
+            return;
+        }
+
+        let save_label = match self.form_mode {
+            Some(FormMode::Edit) => "Update",
+            _ => "Add Item",
+        };
 
         ui.horizontal(|ui| {
-            if matches!(self.form_mode, Some(FormMode::Edit)) {
-                if ui.button("Copy to another day…").clicked() {
-                    if let Some(id) = &self.form_item_id {
-                        self.copy_source_id = Some(id.clone());
-                    }
+            ui.set_width(ui.available_width());
+            if matches!(self.form_mode, Some(FormMode::Edit))
+                && accent_ghost_button_enabled(ui, palette, "Copy to another day…", can_save)
+                    .clicked()
+            {
+                if let Some(id) = &self.form_item_id {
+                    self.copy_source_id = Some(id.clone());
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can_save = !self.form_title.trim().is_empty();
-                ui.add_enabled_ui(can_save, |ui| {
-                    if primary_button(ui, palette, "Save").clicked() {
-                        self.submit_form();
-                    }
-                });
+                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                if primary_button_enabled(ui, palette, save_label, can_save).clicked() {
+                    self.submit_form();
+                }
                 if secondary_button(ui, palette, "Cancel").clicked() {
                     self.cancel_form();
                 }
@@ -1115,293 +1588,846 @@ impl WeeklyTrackerApp {
         });
     }
 
+    /// Renders the frameless Markdown Export modal (`Export Report`) with scrim/Esc/X dismissal,
+    /// active-highlighted date range presets, live monospace Markdown preview, and `.md` save dialog.
     fn export_modal(&mut self, ctx: &egui::Context, palette: Palette) {
-        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("export_modal_backdrop"));
+        let backdrop = paint_modal_backdrop(ctx, palette, egui::Id::new("export_modal_backdrop"));
         if backdrop.clicked() {
             self.show_export = false;
+            return;
         }
-        let mut open = true;
-        egui::Window::new("Export Report")
-            .open(&mut open)
+
+        let today = today_local();
+        let presets = [
+            (
+                "This week",
+                format_date_key(start_of_week(today)),
+                format_date_key(end_of_week(today)),
+            ),
+            (
+                "Last 7 days",
+                format_date_key(today - Duration::days(6)),
+                format_date_key(today),
+            ),
+            (
+                "Last 30 days",
+                format_date_key(today - Duration::days(29)),
+                format_date_key(today),
+            ),
+            (
+                "This month",
+                format_date_key(start_of_month(today)),
+                format_date_key(end_of_month(today)),
+            ),
+        ];
+
+        let mut close_requested = false;
+        egui::Window::new("export_report_modal")
+            .title_bar(false)
             .collapsible(false)
-            .resizable(true)
-            .default_width(520.0)
+            .resizable(false)
+            .fixed_size([540.0, 0.0])
+            .frame(modal_window_frame(palette))
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                modal_content_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Date range")
-                            .small()
-                            .strong()
-                            .color(palette.text_muted),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("From");
-                        ui.text_edit_singleline(&mut self.export_start);
-                        ui.label("To");
-                        ui.text_edit_singleline(&mut self.export_end);
-                    });
+                if modal_header(
+                    ui,
+                    palette,
+                    "Export Report",
+                    Some("Generate a clean Markdown summary for standups or status updates"),
+                ) {
+                    close_requested = true;
+                }
 
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("This week").clicked() {
-                            let t = today_local();
-                            self.export_start = format_date_key(start_of_week(t));
-                            self.export_end = format_date_key(end_of_week(t));
-                        }
-                        if ui.button("Last 7 days").clicked() {
-                            let t = today_local();
-                            self.export_start = format_date_key(t - Duration::days(6));
-                            self.export_end = format_date_key(t);
-                        }
-                        if ui.button("Last 30 days").clicked() {
-                            let t = today_local();
-                            self.export_start = format_date_key(t - Duration::days(29));
-                            self.export_end = format_date_key(t);
-                        }
-                        if ui.button("This month").clicked() {
-                            let t = today_local();
-                            self.export_start = format_date_key(start_of_month(t));
-                            self.export_end = format_date_key(end_of_month(t));
-                        }
-                    });
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let half_w = ((ui.available_width() - SPACE_MD) * 0.5).max(120.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_MD;
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(half_w, 0.0),
+                                Layout::top_down(Align::LEFT),
+                                |ui| {
+                                    ui.label(
+                                        rich_bold("Start date", 12.0).color(palette.text_muted),
+                                    );
+                                    ui.add_space(4.0);
+                                    styled_singleline_input(
+                                        ui,
+                                        palette,
+                                        &mut self.export_start,
+                                        "YYYY-MM-DD",
+                                    );
+                                },
+                            );
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(half_w, 0.0),
+                                Layout::top_down(Align::LEFT),
+                                |ui| {
+                                    ui.label(rich_bold("End date", 12.0).color(palette.text_muted));
+                                    ui.add_space(4.0);
+                                    styled_singleline_input(
+                                        ui,
+                                        palette,
+                                        &mut self.export_end,
+                                        "YYYY-MM-DD",
+                                    );
+                                },
+                            );
+                        });
 
-                    let range = match (
-                        parse_date_key(&self.export_start),
-                        parse_date_key(&self.export_end),
-                    ) {
-                        (Some(start), Some(end)) if start <= end => Some((start, end)),
-                        _ => None,
-                    };
-
-                    if range.is_none()
-                        && !self.export_start.is_empty()
-                        && !self.export_end.is_empty()
-                    {
-                        ui.colored_label(Color32::RED, "Enter a valid range (start ≤ end).");
-                    }
-
-                    ui.separator();
-                    ui.label(RichText::new("Preview").small().strong());
-                    ScrollArea::vertical()
-                        .id_salt("export_preview")
-                        .max_height(220.0)
-                        .show(ui, |ui| {
-                            if let Some((start, end)) = range {
-                                let md = generate_markdown_for_range(&self.items, start, end);
-                                ui.monospace(&md);
-                            } else {
-                                ui.label(
-                                    RichText::new("Select a valid date range to preview")
-                                        .color(palette.text_muted),
-                                );
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(SPACE_SM, 6.0);
+                            for (label, start_key, end_key) in &presets {
+                                let active = &self.export_start == start_key
+                                    && &self.export_end == end_key;
+                                if preset_button(ui, palette, label, active).clicked() {
+                                    self.export_start = start_key.clone();
+                                    self.export_end = end_key.clone();
+                                }
                             }
                         });
 
-                    ui.add_space(SPACE_SM);
-                    ui.horizontal(|ui| {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if let Some((start, end)) = range {
-                                if primary_button(ui, palette, "Download .md").clicked() {
-                                    let md = generate_markdown_for_range(&self.items, start, end);
-                                    let filename = format!(
-                                        "report-{}-to-{}.md",
-                                        self.export_start, self.export_end
-                                    );
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .set_title("Time Tracker — Export Report")
-                                        .set_file_name(&filename)
-                                        .add_filter("Markdown", &["md"])
-                                        .save_file()
-                                    {
-                                        if std::fs::write(&path, &md).is_ok() {
-                                            let _ = open::that(path);
+                        let range = match (
+                            parse_date_key(&self.export_start),
+                            parse_date_key(&self.export_end),
+                        ) {
+                            (Some(start), Some(end)) if start <= end => Some((start, end)),
+                            _ => None,
+                        };
+
+                        if range.is_none()
+                            && !self.export_start.is_empty()
+                            && !self.export_end.is_empty()
+                        {
+                            ui.add_space(SPACE_SM);
+                            ui.label(
+                                RichText::new(
+                                    "Enter valid YYYY-MM-DD dates with start date on or before end date.",
+                                )
+                                .size(12.0)
+                                .color(palette.danger_fg),
+                            );
+                        }
+
+                        ui.add_space(SPACE_MD);
+                        ui.label(rich_bold("Markdown Preview", 12.0).color(palette.text_muted));
+                        ui.add_space(6.0);
+
+                        Frame::new()
+                            .fill(palette.background)
+                            .stroke(Stroke::new(1.0, palette.border))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::same(12))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ScrollArea::vertical()
+                                    .id_salt("export_preview")
+                                    .auto_shrink([false, false])
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        if let Some((start, end)) = range {
+                                            let md =
+                                                generate_markdown_for_range(&self.items, start, end);
+                                            ui.label(
+                                                RichText::new(md)
+                                                    .monospace()
+                                                    .size(12.0)
+                                                    .color(palette.text),
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Select a valid date range above to preview the Markdown report.",
+                                                )
+                                                .size(12.5)
+                                                .color(palette.text_muted),
+                                            );
+                                        }
+                                    });
+                            });
+                    });
+
+                let range = match (
+                    parse_date_key(&self.export_start),
+                    parse_date_key(&self.export_end),
+                ) {
+                    (Some(start), Some(end)) if start <= end => Some((start, end)),
+                    _ => None,
+                };
+
+                horizontal_divider(ui, palette.divider);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                let dl_label =
+                                    icon_label_bold(DOWNLOAD, "Download .md", 13.0, palette.on_primary);
+                                if let Some((start, end)) = range {
+                                    if primary_button(ui, palette, dl_label).clicked() {
+                                        let md =
+                                            generate_markdown_for_range(&self.items, start, end);
+                                        let filename = format!(
+                                            "report-{}-to-{}.md",
+                                            self.export_start, self.export_end
+                                        );
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .set_title("Time Tracker — Export Report")
+                                            .set_file_name(&filename)
+                                            .add_filter("Markdown", &["md"])
+                                            .save_file()
+                                        {
+                                            if std::fs::write(&path, &md).is_ok() {
+                                                let _ = open::that(path);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let _ = primary_button_enabled(ui, palette, dl_label, false);
+                                }
+                                if secondary_button(ui, palette, "Close").clicked() {
+                                    close_requested = true;
+                                }
+                            });
+                        });
+                    });
+            });
+
+        if close_requested {
+            self.show_export = false;
+        }
+    }
+
+    /// Renders the frameless Settings modal with a segmented `Storage | Updates | About | Contact`
+    /// tab bar and scrim/Esc/X dismissal.
+    fn settings_modal(&mut self, ctx: &egui::Context, palette: Palette) {
+        let backdrop =
+            paint_modal_backdrop(ctx, palette, egui::Id::new("settings_modal_backdrop"));
+        if backdrop.clicked() {
+            self.show_settings = false;
+            return;
+        }
+
+        let mut close_requested = false;
+        egui::Window::new("settings_modal_window")
+            .title_bar(false)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([496.0, 0.0])
+            .frame(modal_window_frame(palette))
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                if modal_header(
+                    ui,
+                    palette,
+                    "Settings",
+                    Some("Local data storage, release checks, and application details"),
+                ) {
+                    close_requested = true;
+                }
+
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        Frame::new()
+                            .fill(palette.surface_muted)
+                            .stroke(Stroke::new(1.0, palette.border))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::same(3))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
+                                    for (tab, label) in [
+                                        (SettingsTab::Storage, "Storage"),
+                                        (SettingsTab::Updates, "Updates"),
+                                        (SettingsTab::About, "About"),
+                                        (SettingsTab::Contact, "Contact"),
+                                    ] {
+                                        if settings_tab_button(
+                                            ui,
+                                            palette,
+                                            label,
+                                            self.settings_tab == tab,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.settings_tab = tab;
+                                        }
+                                    }
+                                });
+                            });
+
+                        ui.add_space(SPACE_MD);
+
+                        Frame::new()
+                            .fill(palette.background)
+                            .stroke(Stroke::new(1.0, palette.border))
+                            .corner_radius(CornerRadius::same(10))
+                            .inner_margin(Margin::same(14))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                match self.settings_tab {
+                                    SettingsTab::Storage => {
+                                        ui.label(
+                                            rich_bold("Local-first JSON storage", 13.5)
+                                                .color(palette.text),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Your work entries and preferences stay strictly on this machine.",
+                                            )
+                                            .size(12.5)
+                                            .color(palette.text_muted),
+                                        );
+                                        ui.add_space(10.0);
+                                        Frame::new()
+                                            .fill(palette.surface)
+                                            .stroke(Stroke::new(1.0, palette.border))
+                                            .corner_radius(CornerRadius::same(7))
+                                            .inner_margin(Margin::symmetric(10, 8))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.label(
+                                                    RichText::new(storage_dir_display())
+                                                        .monospace()
+                                                        .size(12.0)
+                                                        .color(palette.text),
+                                                );
+                                            });
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Compatible with ~/.weekly-tracker/data.json & prefs.json.",
+                                            )
+                                            .size(11.5)
+                                            .color(palette.text_faint),
+                                        );
+                                    }
+                                    SettingsTab::Updates => {
+                                        ui.label(
+                                            rich_bold(
+                                                format!("Installed version · v{APP_VERSION}"),
+                                                13.5,
+                                            )
+                                            .color(palette.text),
+                                        );
+                                        ui.add_space(8.0);
+                                        if ui
+                                            .checkbox(
+                                                &mut self.prefs.check_updates_on_startup,
+                                                "Check for new releases automatically on startup",
+                                            )
+                                            .changed()
+                                        {
+                                            self.persist_prefs();
+                                        }
+                                        ui.add_space(12.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing =
+                                                Vec2::new(SPACE_SM, SPACE_SM);
+                                            let label = if self.update_busy {
+                                                "Checking…"
+                                            } else {
+                                                "Check for updates"
+                                            };
+                                            if primary_button_enabled(
+                                                ui,
+                                                palette,
+                                                label,
+                                                !self.update_busy,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.settings_update_notice = None;
+                                                self.spawn_update_check(
+                                                    ui.ctx(),
+                                                    UpdatePollKind::Settings,
+                                                );
+                                            }
+                                            if secondary_button(
+                                                ui,
+                                                palette,
+                                                "View GitHub releases",
+                                            )
+                                            .clicked()
+                                            {
+                                                Self::open_github(APP_RELEASES_URL);
+                                            }
+                                        });
+                                        ui.add_space(10.0);
+                                        if let Some(notice) = &self.settings_update_notice {
+                                            horizontal_divider(ui, palette.divider);
+                                            ui.add_space(8.0);
+                                            match notice {
+                                                UpdateNotice::Error(text) => {
+                                                    ui.colored_label(palette.danger_fg, text);
+                                                }
+                                                UpdateNotice::UpToDate(text)
+                                                | UpdateNotice::NoReleases(text) => {
+                                                    ui.label(
+                                                        RichText::new(text)
+                                                            .size(12.5)
+                                                            .color(palette.text_muted),
+                                                    );
+                                                }
+                                                UpdateNotice::Newer { text, url } => {
+                                                    ui.label(
+                                                        rich_bold(text, 12.5)
+                                                            .color(palette.accent_soft_fg),
+                                                    );
+                                                    ui.add_space(6.0);
+                                                    if secondary_button(
+                                                        ui,
+                                                        palette,
+                                                        "Open release page",
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        Self::open_github(url);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Queries the latest GitHub release tag over HTTPS.",
+                                                )
+                                                .size(11.5)
+                                                .color(palette.text_faint),
+                                            );
+                                        }
+                                    }
+                                    SettingsTab::About => {
+                                        ui.label(rich_bold(APP_NAME, 15.5).color(palette.text));
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            RichText::new(APP_TAGLINE)
+                                                .size(12.5)
+                                                .color(palette.text_muted),
+                                        );
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "A fast native Rust + egui desktop logbook for tracking daily engineering work, key achievements, and clean Markdown reports.",
+                                            )
+                                            .size(12.5)
+                                            .color(palette.text),
+                                        );
+                                        ui.add_space(8.0);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "Version {APP_VERSION} · {APP_LICENSE}"
+                                            ))
+                                            .size(11.5)
+                                            .color(palette.text_faint),
+                                        );
+                                    }
+                                    SettingsTab::Contact => {
+                                        ui.label(
+                                            rich_bold("Author & Repository", 13.5)
+                                                .color(palette.text),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(format!("Email: {APP_CONTACT_EMAIL}"))
+                                                .size(12.5)
+                                                .color(palette.text_muted),
+                                        );
+                                        ui.add_space(12.0);
+                                        if secondary_button(ui, palette, "Open GitHub repository")
+                                            .clicked()
+                                        {
+                                            Self::open_github(APP_REPO_URL);
                                         }
                                     }
                                 }
-                            } else {
-                                ui.add_enabled_ui(false, |ui| {
-                                    let _ = primary_button(ui, palette, "Download .md");
-                                });
-                            }
+                            });
+                    });
+
+                horizontal_divider(ui, palette.divider);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if secondary_button(ui, palette, "Close").clicked() {
-                                self.show_export = false;
+                                close_requested = true;
                             }
                         });
                     });
-                });
             });
-        if !open {
-            self.show_export = false;
-        }
-    }
 
-    fn settings_modal(&mut self, ctx: &egui::Context, palette: Palette) {
-        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("settings_modal_backdrop"));
-        if backdrop.clicked() {
-            self.show_settings = false;
-        }
-        let mut open = true;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .collapsible(false)
-            .default_width(460.0)
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                modal_content_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Settings")
-                            .size(20.0)
-                            .strong()
-                            .color(palette.text),
-                    );
-                    ui.add_space(SPACE_SM);
-                ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (SettingsTab::Storage, "Storage"),
-                        (SettingsTab::Updates, "Updates"),
-                        (SettingsTab::About, "About"),
-                        (SettingsTab::Contact, "Contact"),
-                    ] {
-                        if ui
-                            .selectable_label(self.settings_tab == tab, label)
-                            .clicked()
-                        {
-                            self.settings_tab = tab;
-                        }
-                    }
-                });
-                ui.separator();
-
-                match self.settings_tab {
-                    SettingsTab::Storage => {
-                        ui.label("Your entries are stored on this device only.");
-                        ui.label(format!("Data directory: {}", storage_dir_display()));
-                        ui.label("(Compatible with the Electron app’s ~/.weekly-tracker/ layout.)");
-                    }
-                    SettingsTab::Updates => {
-                        ui.label(format!("Installed version: {APP_VERSION}"));
-                        ui.checkbox(
-                            &mut self.prefs.check_updates_on_startup,
-                            "Check for updates when the app opens",
-                        );
-                        if primary_button(ui, palette, "Save preferences").clicked() {
-                            self.persist_prefs();
-                        }
-                        ui.horizontal(|ui| {
-                            let label = if self.update_busy {
-                                "Checking…"
-                            } else {
-                                "Check for updates now"
-                            };
-                            if ui
-                                .add_enabled(!self.update_busy, egui::Button::new(label))
-                                .clicked()
-                            {
-                                self.settings_update_notice = None;
-                                self.spawn_update_check(ui.ctx(), UpdatePollKind::Settings);
-                            }
-                            if ui.button("View releases on GitHub").clicked() {
-                                Self::open_github(APP_RELEASES_URL);
-                            }
-                        });
-                        if let Some(notice) = &self.settings_update_notice {
-                            ui.separator();
-                            match notice {
-                                UpdateNotice::Error(text) => {
-                                    ui.colored_label(Color32::RED, text);
-                                }
-                                UpdateNotice::UpToDate(text) | UpdateNotice::NoReleases(text) => {
-                                    ui.label(text);
-                                }
-                                UpdateNotice::Newer { text, url } => {
-                                    ui.label(text);
-                                    if ui.button("Open release page").clicked() {
-                                        Self::open_github(url);
-                                    }
-                                }
-                            }
-                        } else {
-                            ui.label(
-                                RichText::new(
-                                    "Compares this install to the latest GitHub release (network required).",
-                                )
-                                .small()
-                                .color(palette.text_muted),
-                            );
-                        }
-                    }
-                    SettingsTab::About => {
-                        ui.heading(APP_NAME);
-                        ui.label(APP_TAGLINE);
-                        ui.label(format!("Version {APP_VERSION}"));
-                        ui.label(
-                            "A desktop application for tracking daily work items, achievements, and generating reports.",
-                        );
-                        ui.label(APP_LICENSE);
-                    }
-                    SettingsTab::Contact => {
-                        ui.label(format!("Email: {APP_CONTACT_EMAIL}"));
-                        if ui.button("Open GitHub repository").clicked() {
-                            Self::open_github(APP_REPO_URL);
-                        }
-                    }
-                }
-
-                    if secondary_button(ui, palette, "Close").clicked() {
-                        self.show_settings = false;
-                    }
-                });
-            });
-        if !open {
+        if close_requested {
             self.show_settings = false;
         }
     }
 
+    /// Renders the frameless `Copy to Another Day` modal for duplicating a work item onto a
+    /// validated `YYYY-MM-DD` target date (`Today` / `Tomorrow` quick chips, `Enter` submit).
     fn copy_modal(&mut self, ctx: &egui::Context, palette: Palette) {
+        let backdrop = paint_modal_backdrop(ctx, palette, egui::Id::new("copy_modal_backdrop"));
+        if backdrop.clicked() {
+            self.copy_source_id = None;
+            return;
+        }
+
         let source_title = self
             .copy_source_id
             .as_ref()
             .and_then(|id| self.items.iter().find(|i| &i.id == id))
             .map(|i| i.title.clone())
             .unwrap_or_default();
-
         let source_id = self.copy_source_id.clone();
-        let backdrop = paint_modal_backdrop(ctx, egui::Id::new("copy_modal_backdrop"));
-        if backdrop.clicked() {
-            self.copy_source_id = None;
-        }
-        let mut open = true;
-        egui::Window::new("Copy to another day")
-            .open(&mut open)
+
+        let today = today_local();
+        let tomorrow_key = format_date_key(today + Duration::days(1));
+        let today_key = format_date_key(today);
+
+        let mut close_requested = false;
+        egui::Window::new("copy_item_modal")
+            .title_bar(false)
             .collapsible(false)
+            .resizable(false)
+            .fixed_size([420.0, 0.0])
+            .frame(modal_window_frame(palette))
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                modal_content_frame().show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Copy to another day")
-                            .size(18.0)
-                            .strong()
-                            .color(palette.text),
-                    );
-                    ui.add_space(SPACE_SM);
-                    ui.label(&source_title);
-                    ui.label("Target date (yyyy-MM-dd)");
-                    ui.text_edit_singleline(&mut self.copy_target_date);
-                    ui.horizontal(|ui| {
-                        if secondary_button(ui, palette, "Cancel").clicked() {
-                            self.copy_source_id = None;
+                if modal_header(
+                    ui,
+                    palette,
+                    "Copy to Another Day",
+                    Some("Duplicate this work entry onto a target date"),
+                ) {
+                    close_requested = true;
+                }
+
+                let mut submit_enter = false;
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+
+                        Frame::new()
+                            .fill(palette.background)
+                            .stroke(Stroke::new(1.0, palette.border))
+                            .corner_radius(CornerRadius::same(8))
+                            .inner_margin(Margin::symmetric(12, 9))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(
+                                    RichText::new("Source item")
+                                        .size(11.0)
+                                        .color(palette.text_faint),
+                                );
+                                ui.add_space(2.0);
+                                ui.label(rich_bold(&source_title, 13.0).color(palette.text));
+                            });
+
+                        ui.add_space(SPACE_MD);
+                        ui.label(
+                            rich_bold("Target date (YYYY-MM-DD)", 12.0).color(palette.text_muted),
+                        );
+                        ui.add_space(6.0);
+                        let input_resp = styled_singleline_input(
+                            ui,
+                            palette,
+                            &mut self.copy_target_date,
+                            "YYYY-MM-DD",
+                        );
+                        if input_resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            submit_enter = true;
                         }
-                        if primary_button(ui, palette, "Copy item").clicked() {
-                            if let Some(id) = source_id.clone() {
-                                let target = self.copy_target_date.clone();
-                                self.copy_item_to_date(&id, &target);
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            if preset_button(
+                                ui,
+                                palette,
+                                "Today",
+                                self.copy_target_date == today_key,
+                            )
+                            .clicked()
+                            {
+                                self.copy_target_date = today_key.clone();
                             }
-                        }
+                            if preset_button(
+                                ui,
+                                palette,
+                                "Tomorrow",
+                                self.copy_target_date == tomorrow_key,
+                            )
+                            .clicked()
+                            {
+                                self.copy_target_date = tomorrow_key.clone();
+                            }
+                        });
                     });
-                });
+
+                let valid_target = parse_date_key(&self.copy_target_date).is_some();
+                if submit_enter && valid_target {
+                    if let Some(id) = source_id.clone() {
+                        let target = self.copy_target_date.clone();
+                        self.copy_item_to_date(&id, &target);
+                        return;
+                    }
+                }
+
+                horizontal_divider(ui, palette.divider);
+                Frame::new()
+                    .inner_margin(Margin::symmetric(SPACE_LG as i8, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            if primary_button_enabled(ui, palette, "Copy Item", valid_target)
+                                .clicked()
+                            {
+                                if let Some(id) = source_id.clone() {
+                                    let target = self.copy_target_date.clone();
+                                    self.copy_item_to_date(&id, &target);
+                                }
+                            }
+                            if secondary_button(ui, palette, "Cancel").clicked() {
+                                close_requested = true;
+                            }
+                        });
+                    });
             });
-        if !open {
+
+        if close_requested {
             self.copy_source_id = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::chrome::{
+        DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    };
+
+    #[test]
+    fn hero_metrics_aggregate_iso_week_viewed_month_and_achievements_accurately() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(); // Wednesday W47
+        let nov = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let oct = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let now = Utc::now();
+
+        let mk = |id: &str, date: &str, ach: bool| WorkItem {
+            id: id.into(),
+            date: date.into(),
+            title: id.into(),
+            description: String::new(),
+            category: "development".into(),
+            is_achievement: ach,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let items = vec![
+            mk("mon-w47", "2026-11-16", true),
+            mk("sun-w47", "2026-11-22", false),
+            mk("early-nov", "2026-11-03", true),
+            mk("oct-win", "2026-10-28", true),
+            mk("malformed", "not-a-date", true),
+        ];
+
+        let nov_metrics = HeroMetrics::compute(&items, nov, today);
+        assert_eq!(nov_metrics.this_week_count, 2);
+        assert_eq!(nov_metrics.month_count, 3);
+        assert_eq!(nov_metrics.month_achievements, 2);
+
+        let oct_metrics = HeroMetrics::compute(&items, oct, today);
+        assert_eq!(oct_metrics.this_week_count, 2);
+        assert_eq!(oct_metrics.month_count, 1);
+        assert_eq!(oct_metrics.month_achievements, 1);
+    }
+
+    /// Exercises every major UI view (splash, toolbar, brand hero banner in both standard and
+    /// compact viewport heights, calendar, empty & populated day detail, `+ Log Today` action,
+    /// item form, export modal, settings tabs, and copy modal) across all six themes inside a
+    /// headless `egui::Context` without touching disk storage.
+    #[test]
+    fn headless_views_hero_and_modals_render_cleanly_across_all_themes() {
+        let ctx = egui::Context::default();
+        icons::install_fonts(&ctx);
+        let today = today_local();
+        let today_key = format_date_key(today);
+
+        let mut app = WeeklyTrackerApp {
+            items: Vec::new(),
+            month_offset: -2,
+            pinned_date: None,
+            hover_date: None,
+            theme: ThemeId::Default,
+            prefs: Prefs::default(),
+            show_export: false,
+            show_settings: false,
+            settings_tab: SettingsTab::Storage,
+            form_mode: None,
+            form_item_id: None,
+            form_date: None,
+            form_title: String::new(),
+            form_description: String::new(),
+            form_category: "development".into(),
+            form_achievement: false,
+            export_start: format_date_key(start_of_month(today)),
+            export_end: format_date_key(end_of_month(today)),
+            copy_source_id: None,
+            copy_target_date: format_date_key(today + Duration::days(1)),
+            splash_active: true,
+            splash_started: Instant::now(),
+            update_rx: None,
+            update_poll_kind: None,
+            update_busy: false,
+            update_banner: Some(UpdateBanner {
+                title: "v0.2.0".into(),
+                url: APP_RELEASES_URL.into(),
+            }),
+            settings_update_notice: None,
+        };
+
+        let raw_input_sized = |w: f32, h: f32| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
+            ..Default::default()
+        };
+
+        // 1. Splash overlay frame + `+ Log Today` state transition check.
+        apply_visuals(&ctx, app.theme);
+        let _ = ctx.run(
+            raw_input_sized(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+            |ctx| {
+                let p = app.palette();
+                app.splash_overlay(ctx, p);
+            },
+        );
+        app.dismiss_splash(&ctx);
+        assert!(!app.splash_active);
+
+        app.log_today();
+        assert_eq!(app.month_offset, 0);
+        assert_eq!(app.pinned_date, Some(today));
+        assert!(matches!(app.form_mode, Some(FormMode::Add)));
+        app.cancel_form();
+
+        // 2. Empty & populated Brand Hero + toolbar + calendar + day detail across all 6 themes
+        // at default (1140x760), compact-height (960x600), and minimum (797x480) viewports.
+        for theme in ThemeId::ALL {
+            app.theme = theme;
+            apply_visuals(&ctx, theme);
+            let p = app.palette();
+
+            for &(w, h, compact) in &[
+                (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, false),
+                (960.0, 600.0, true),
+                (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, true),
+            ] {
+                let ultra_short = h < 540.0;
+                let hero_pad_v: i8 = if ultra_short {
+                    6
+                } else if compact {
+                    8
+                } else {
+                    10
+                };
+                let cal_pad_v: i8 = if ultra_short {
+                    8
+                } else if compact {
+                    10
+                } else {
+                    12
+                };
+
+                let _ = ctx.run(raw_input_sized(w, h), |ctx| {
+                    egui::TopBottomPanel::top("t")
+                        .frame(toolbar_panel_frame(p))
+                        .show(ctx, |ui| app.toolbar(ui, p));
+                    egui::TopBottomPanel::bottom("f")
+                        .frame(Frame::new().fill(p.background).inner_margin(Margin::ZERO))
+                        .show(ctx, |ui| {
+                            horizontal_divider(ui, p.border);
+                            Frame::new()
+                                .inner_margin(Margin::symmetric(SPACE_MD as i8, 5))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("footer").size(11.0));
+                                });
+                        });
+                    egui::CentralPanel::default()
+                        .frame(Frame::new().fill(p.background).inner_margin(Margin::ZERO))
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            Frame::new()
+                                .inner_margin(Margin::symmetric(12, hero_pad_v))
+                                .show(ui, |ui| app.brand_hero(ui, p, compact));
+                            horizontal_divider(ui, p.border);
+
+                            let split_h = ui.available_height();
+                            let inner_h = split_h - (cal_pad_v as f32) * 2.0;
+                            let scroll_h = inner_h - 70.0;
+                            let cell = cal_day_cell_for_layout(420.0, 6, scroll_h);
+                            let grid_h = cal_month_grid_content_height(6, cell);
+                            assert!(
+                                grid_h <= scroll_h + 0.5,
+                                "theme {theme:?} at {w}x{h}: 6-row calendar {grid_h} > scroll_h {scroll_h}"
+                            );
+
+                            app.month_calendar(ui, p, inner_h);
+                            app.day_detail(ui, p);
+                        });
+                });
+            }
+        }
+
+        // 3. Populated item card + Edit form + Export + Settings tabs + Copy modal.
+        app.items.push(WorkItem {
+            id: "item-1".into(),
+            date: today_key,
+            title: "Redesigned UI architecture".into(),
+            description: "Layered neutrals, brand hero banner, and Phosphor iconography.".into(),
+            category: "development".into(),
+            is_achievement: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        app.show_export = true;
+        app.show_settings = true;
+        app.copy_source_id = Some("item-1".into());
+
+        let p = app.palette();
+        for tab in [
+            SettingsTab::Storage,
+            SettingsTab::Updates,
+            SettingsTab::About,
+            SettingsTab::Contact,
+        ] {
+            app.settings_tab = tab;
+            let _ = ctx.run(
+                raw_input_sized(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.brand_hero(ui, p, false);
+                        app.day_detail(ui, p);
+                        app.open_add_form(today);
+                        app.item_form(ui, p);
+                        app.cancel_form();
+                    });
+                    app.export_modal(ctx, p);
+                    app.settings_modal(ctx, p);
+                    app.copy_modal(ctx, p);
+                },
+            );
         }
     }
 }
