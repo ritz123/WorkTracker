@@ -185,7 +185,8 @@ pub fn category_style(category_id: &str, is_dark: bool) -> CategoryBadgeStyle {
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub is_dark: bool,
-    /// App canvas behind elevated cards (`CentralPanel` and footer ground).
+    /// App canvas behind elevated cards (`CentralPanel`). The title bar and footer use
+    /// [`crate::ui::chrome::chrome_bar_fill`] instead, so this stays the page ground.
     pub background: Color32,
     /// Primary elevated card surface (top bar, calendar card, detail pane, modals).
     pub surface: Color32,

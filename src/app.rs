@@ -32,14 +32,15 @@ use crate::ui::chrome::{
     preset_button, primary_button, primary_button_compact, primary_button_enabled,
     scrubber_icon_button, scrubber_today_button, secondary_button, settings_tab_button,
     soft_accent_button, soft_accent_button_enabled, status_pill, styled_multiline_input,
-    styled_singleline_input, theme_menu_row, theme_swatch_button, toggle_icon_button,
-    toolbar_panel_frame, vertical_divider, HeroContent, CAL_WEEK_COL_WIDTH, CARD_RADIUS,
-    DETAIL_COLUMN_MIN_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    styled_singleline_input, theme_menu_row, theme_swatch_button, title_bar_icon_palette,
+    toggle_icon_button, toolbar_panel_frame, vertical_divider, HeroContent, CAL_WEEK_COL_WIDTH,
+    CARD_RADIUS, DETAIL_COLUMN_MIN_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
 };
 use crate::ui::icons::{
     self, font_bold, icon_label, icon_label_bold, rich_bold, CALENDAR_BLANK, CARET_LEFT,
-    CARET_RIGHT, CHECK_CIRCLE, COPY, DOWNLOAD, EXPORT, FILE_TEXT, FOLDER_OPEN, GEAR, PENCIL, PLUS,
-    PUSH_PIN, PUSH_PIN_SLASH, TIMER, TRASH, UPLOAD_SIMPLE, WARNING_CIRCLE, X,
+    CARET_RIGHT, CHECK_CIRCLE, COPY, CORNERS_IN, DOWNLOAD, EXPORT, FILE_TEXT, FOLDER_OPEN, GEAR,
+    MINUS, PENCIL, PLUS, PUSH_PIN, PUSH_PIN_SLASH, SQUARE, TIMER, TRASH, UPLOAD_SIMPLE,
+    WARNING_CIRCLE, X,
 };
 use crate::updates::{self, UpdateCheckResult};
 
@@ -996,9 +997,8 @@ impl eframe::App for WeeklyTrackerApp {
             });
 
         egui::TopBottomPanel::bottom("footer")
-            .frame(Frame::new().fill(palette.background).inner_margin(Margin::ZERO))
+            .frame(toolbar_panel_frame(palette))
             .show(ctx, |ui| {
-                horizontal_divider(ui, palette.border);
                 Frame::new()
                     .inner_margin(Margin::symmetric(SPACE_MD as i8, 5))
                     .show(ui, |ui| {
@@ -1011,13 +1011,13 @@ impl eframe::App for WeeklyTrackerApp {
                                     APP_LICENSE
                                 ))
                                 .size(11.0)
-                                .color(palette.text_muted),
+                                .color(palette.on_primary),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(format!("{APP_NAME} v{APP_VERSION}"))
                                         .size(11.0)
-                                        .color(palette.text_faint),
+                                        .color(Color32::from_white_alpha(200)),
                                 );
                             });
                         });
@@ -1132,15 +1132,22 @@ impl eframe::App for WeeklyTrackerApp {
 }
 
 impl WeeklyTrackerApp {
-    /// Renders the compact ~45px top utility bar (`palette.surface` fill + `1px` bottom hairline)
+    /// Renders the compact ~45px top utility bar (`chrome_bar_fill` + a darker bottom seam)
     /// dedicated to navigation and workspace controls (`< | Today | >` month scrubber, active
     /// `Month Year`, dual-tone Theme picker, Settings icon, and Export button) so it pairs cleanly
     /// with [`Self::brand_hero`] directly below without competing duplicate brand headers.
     ///
+    /// The month title and the window icons use white ink because the bar is the theme color.
+    /// The scrubber, Import, Export, and Theme chips stay on the page palette so they remain
+    /// light buttons sitting on that color.
+    ///
     /// The OS window frame is disabled, so this bar is the title-bar replacement. Empty space in
     /// the bar (not the buttons) starts a window drag via [`egui::ViewportCommand::StartDrag`].
-    /// `Close` is the rightmost control and sends [`egui::ViewportCommand::Close`], which shuts
-    /// the process down the same way the removed title-bar button did.
+    /// `Minimize`, `Maximize`/`Restore`, and `Close` sit at the right edge, in that order.
+    /// They replace the removed title-bar buttons: minimize sends
+    /// [`egui::ViewportCommand::Minimized`], maximize toggles
+    /// [`egui::ViewportCommand::Maximized`], and close sends
+    /// [`egui::ViewportCommand::Close`].
     fn toolbar(&mut self, ui: &mut egui::Ui, palette: Palette) {
         let drag = ui.interact(ui.max_rect(), ui.id().with("window_drag"), Sense::drag());
         if drag.drag_started_by(egui::PointerButton::Primary) {
@@ -1183,7 +1190,9 @@ impl WeeklyTrackerApp {
                         });
 
                     ui.add_space(SPACE_XS);
-                    ui.label(rich_bold(format_month_year(grid.month), 15.5).color(palette.text));
+                    ui.label(
+                        rich_bold(format_month_year(grid.month), 15.5).color(palette.on_primary),
+                    );
                     if self.month_offset == 0 {
                         status_pill(
                             ui,
@@ -1196,8 +1205,23 @@ impl WeeklyTrackerApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = SPACE_SM;
-                        if ghost_icon_button(ui, palette, X, 14.0, "Close").clicked() {
+                        let icons = title_bar_icon_palette(palette);
+                        if ghost_icon_button(ui, icons, X, 14.0, "Close").clicked() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                        let (zoom_icon, zoom_tip) = if maximized {
+                            (CORNERS_IN, "Restore")
+                        } else {
+                            (SQUARE, "Maximize")
+                        };
+                        if ghost_icon_button(ui, icons, zoom_icon, 14.0, zoom_tip).clicked() {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        if ghost_icon_button(ui, icons, MINUS, 14.0, "Minimize").clicked() {
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                         if secondary_button(
                             ui,
@@ -1221,11 +1245,11 @@ impl WeeklyTrackerApp {
                             self.open_import_modal();
                         }
 
-                        if ghost_icon_button(ui, palette, GEAR, 16.5, "Settings").clicked() {
+                        if ghost_icon_button(ui, icons, GEAR, 16.5, "Settings").clicked() {
                             self.show_settings = true;
                         }
 
-                        vertical_divider(ui, 18.0, palette.divider);
+                        vertical_divider(ui, 18.0, Color32::from_white_alpha(80));
 
                         let theme_btn = theme_swatch_button(ui, palette, self.theme);
                         let bar_id = ui.id().with("toolbar_theme_bar");
@@ -1244,7 +1268,7 @@ impl WeeklyTrackerApp {
                 });
             });
 
-        horizontal_divider(ui, palette.border);
+        horizontal_divider(ui, Color32::from_black_alpha(40));
     }
 
     /// Renders the brand-themed Hero Banner (`Work Tracker — Track your work. Celebrate your wins.`)
@@ -3372,6 +3396,8 @@ mod tests {
                 let right = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = SPACE_SM;
                     let _ = ghost_icon_button(ui, p, X, 14.0, "Close");
+                    let _ = ghost_icon_button(ui, p, SQUARE, 14.0, "Maximize");
+                    let _ = ghost_icon_button(ui, p, MINUS, 14.0, "Minimize");
                     let _ = secondary_button(ui, p, icon_label(EXPORT, "Export", 13.0, p.text));
                     let _ = secondary_button(ui, p, icon_label(UPLOAD_SIMPLE, "Import", 13.0, p.text));
                     let _ = ghost_icon_button(ui, p, GEAR, 16.5, "Settings");

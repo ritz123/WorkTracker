@@ -123,6 +123,12 @@ pub const TRASH: &str = "\u{E4A6}";
 pub const UPLOAD_SIMPLE: &str = "\u{E4C0}";
 pub const WARNING_CIRCLE: &str = "\u{E4E2}";
 pub const X: &str = "\u{E4F6}";
+/// Phosphor `minus`. Window minimize control in the frameless toolbar.
+pub const MINUS: &str = "\u{E32A}";
+/// Phosphor `square`. Window maximize control when the window is not maximized.
+pub const SQUARE: &str = "\u{E45E}";
+/// Phosphor `corners-in`. Restore control shown in place of [`SQUARE`] while maximized.
+pub const CORNERS_IN: &str = "\u{E1CE}";
 
 /// Icon-only [`RichText`] at `size` logical pixels and `color`.
 pub fn icon_text(icon: &str, size: f32, color: Color32) -> RichText {
