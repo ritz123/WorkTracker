@@ -27,7 +27,24 @@ fn main() {
         "resolved version '{version}' is not MAJOR.MINOR.PATCH"
     );
     println!("cargo:rustc-env=WORK_TRACKER_VERSION={version}");
+
+    // The desktop shortcut and Explorer use the icon stored in the Windows
+    // executable. Linux and macOS have no equivalent resource; those windows
+    // take the same picture from `app_icon` at runtime.
+    println!("cargo:rerun-if-changed=packaging/icon/worktracker.ico");
+    embed_windows_icon();
 }
+
+#[cfg(target_os = "windows")]
+fn embed_windows_icon() {
+    let mut res = winres::WindowsResource::new();
+    res.set_icon("packaging/icon/worktracker.ico");
+    res.compile()
+        .expect("embedding packaging/icon/worktracker.ico into the Windows executable");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn embed_windows_icon() {}
 
 /// `WORK_TRACKER_VERSION` from the environment, used by the release workflow.
 fn version_from_env() -> Option<String> {

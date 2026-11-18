@@ -22,11 +22,20 @@ jobs:
       - name: Release build
         run: cargo build --release --bin weekly_work_tracker
 
-      - name: Name the executable
-        run: copy target\release\weekly_work_tracker.exe WorkTracker.exe
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force packaging\windows\stage | Out-Null
+          Copy-Item target\release\weekly_work_tracker.exe packaging\windows\stage\WorkTracker.exe
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=$version" "packaging\windows\worktracker.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "packaging\windows\output\WorkTracker-$version-setup.exe" WorkTracker-setup.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: WorkTracker-windows
-          path: WorkTracker.exe
+          path: WorkTracker-setup.exe
           if-no-files-found: error

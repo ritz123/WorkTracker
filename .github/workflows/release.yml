@@ -58,15 +58,28 @@ jobs:
           WORK_TRACKER_VERSION: ${{ github.ref_name }}
         run: cargo build --release --bin weekly_work_tracker
 
-      - name: Stage the binary
-        shell: bash
+      - name: Stage the Linux binary
+        if: runner.os == 'Linux'
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/release/weekly_work_tracker.exe "WorkTracker-${tag}-windows.exe"
-          else
-            cp target/release/weekly_work_tracker "WorkTracker-${tag}-linux"
-          fi
+          cp target/release/weekly_work_tracker "WorkTracker-${tag}-linux"
+
+      # A setup program, not the loose executable. Inno Setup installs it for
+      # the current user and adds the Start menu shortcut. The plain exe is
+      # only an input to the installer.
+      - name: Build the Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag.StartsWith("v")) { $tag = $tag.Substring(1) }
+          New-Item -ItemType Directory -Force packaging\windows\stage | Out-Null
+          Copy-Item target\release\weekly_work_tracker.exe packaging\windows\stage\WorkTracker.exe
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=$tag" "packaging\windows\worktracker.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "packaging\windows\output\WorkTracker-$tag-setup.exe" .
 
       - uses: actions/upload-artifact@v4
         with:
