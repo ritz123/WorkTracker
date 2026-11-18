@@ -3748,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "weekly_work_tracker"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "directories",
