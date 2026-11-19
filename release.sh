@@ -4,6 +4,9 @@
 # Usage: ./release.sh 0.2.0
 #        ./release.sh v0.2.0
 #
+# With no argument it prints the latest vMAJOR.MINOR.PATCH tag and stops.
+# A release prints that same number before tagging the new one.
+#
 # The running app reports the git tag. Cargo.toml is the fallback for a
 # checkout with no tag, so this script writes the same number into
 # Cargo.toml and Cargo.lock, commits that change when it is not already
@@ -15,7 +18,28 @@
 
 set -euo pipefail
 
+cd "$(dirname "$0")"
+git rev-parse --is-inside-work-tree >/dev/null
+
+# The latest release is the highest vMAJOR.MINOR.PATCH tag. Cargo.toml is
+# only used when this checkout has never been tagged, so the number shown
+# is the last release rather than an untagged edit.
+latest_version() {
+  local tag
+  tag="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  if [[ -n "$tag" ]]; then
+    echo "${tag#v}"
+    return
+  fi
+  sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' Cargo.toml | head -1
+}
+
+latest="$(latest_version)"
+
 if [[ $# -ne 1 ]]; then
+  if [[ -n "$latest" ]]; then
+    echo "Latest version is $latest." >&2
+  fi
   echo "Usage: ./release.sh MAJOR.MINOR.PATCH" >&2
   exit 2
 fi
@@ -23,11 +47,15 @@ fi
 version="${1#v}"
 if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be MAJOR.MINOR.PATCH (got '$1')." >&2
+  if [[ -n "$latest" ]]; then
+    echo "Latest version is $latest." >&2
+  fi
   exit 1
 fi
 
-cd "$(dirname "$0")"
-git rev-parse --is-inside-work-tree >/dev/null
+if [[ -n "$latest" ]]; then
+  echo "Latest version was $latest."
+fi
 
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [[ "$branch" == "HEAD" ]]; then
@@ -76,10 +104,34 @@ stamp_version Cargo.lock lock
 grep -q "^version = \"$version\"$" Cargo.toml
 grep -q "^version = \"$version\"$" Cargo.lock
 
-if git diff --quiet -- Cargo.toml Cargo.lock; then
+# The advert page names the release files, WorkTracker-<version>-x86_64.AppImage
+# and WorkTracker-<version>-setup.exe. That number has to be the one just
+# written into Cargo.toml. A page left on the previous version offers a
+# download from the previous tag.
+page="advert/index.html"
+current="$(sed -n 's/.*name="release-version" content="\([0-9][0-9.]*\)".*/\1/p' "$page" | head -1)"
+if [[ -z "$current" ]]; then
+  echo "$page has no release-version, so the download links cannot follow $version." >&2
+  exit 1
+fi
+if [[ "$current" != "$version" ]]; then
+  python3 - "$page" "$current" "$version" <<'PY'
+import pathlib, re, sys
+path, old, new = sys.argv[1:]
+file = pathlib.Path(path)
+text = file.read_text()
+updated, count = re.subn(r"(?<![0-9.])" + re.escape(old) + r"(?![0-9.])", new, text)
+if count == 0:
+    raise SystemExit(f"{path} did not contain version {old}")
+file.write_text(updated)
+PY
+fi
+grep -q "name=\"release-version\" content=\"$version\"" "$page"
+
+if git diff --quiet -- Cargo.toml Cargo.lock advert/index.html; then
   echo "Version is already $version. Tagging the current commit."
 else
-  git add Cargo.toml Cargo.lock
+  git add Cargo.toml Cargo.lock advert/index.html
   git commit -m "Set version to $version"
 fi
 
