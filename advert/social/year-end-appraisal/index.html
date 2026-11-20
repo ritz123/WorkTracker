@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en" data-resolution="portrait">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <title>Work Tracker — year-end appraisal</title>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.15.0/dist/gsap.min.js"></script>
+    <style>
+      /* Work Tracker dark theme (src/theme.rs ThemeId::Dark): slate ground,
+         sapphire primary, gold achievement. Insets stay inside the Reels /
+         TikTok / Shorts safe area so titles are not hidden by the UI. */
+      :root {
+        --ground: #0b0f17;
+        --surface: #162033;
+        --ink: #f4f7fb;
+        --muted: #d5deea;
+        --line: #3a4e6a;
+        --blue: #3b82f6;
+        --blue-soft: #93c5fd;
+        --gold: #fbbf24;
+        --miss: #fecaca;
+        --paper: #f6f1e7;
+        --paper-ink: #1c1917;
+        --paper-muted: #44403c;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: var(--ground);
+      }
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        color: var(--ink);
+        font-family: Montserrat, sans-serif;
+      }
+      .clip { position: absolute; inset: 0; }
+      .ground {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(780px 560px at 80% 8%, rgba(59, 130, 246, 0.34), transparent 64%),
+          radial-gradient(560px 420px at 10% 92%, rgba(251, 191, 36, 0.14), transparent 60%),
+          var(--ground);
+      }
+      .mesh {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(147, 197, 253, 0.1) 2px, transparent 2px),
+          linear-gradient(90deg, rgba(147, 197, 253, 0.1) 2px, transparent 2px);
+        background-size: 96px 96px;
+      }
+      .chrome, .footer {
+        position: absolute;
+        z-index: 5;
+        left: 150px;
+        right: 150px;
+        pointer-events: none;
+      }
+      .chrome {
+        top: 320px;
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+      .brand {
+        font-family: Oswald, sans-serif;
+        font-size: 36px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .brand span { color: var(--blue-soft); }
+      .meta {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 28px;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .footer { bottom: 540px; }
+      .repo {
+        margin-bottom: 18px;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0;
+        color: var(--ink);
+      }
+      .footer-label {
+        display: flex;
+        justify-content: space-between;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 28px;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 16px;
+      }
+      .track {
+        display: block;
+        width: 100%;
+        height: 10px;
+        background: #1c2838;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      #progress {
+        display: block;
+        width: 100%;
+        height: 10px;
+        background: var(--blue);
+        transform-origin: left center;
+      }
+      .scene-inner {
+        position: absolute;
+        left: 150px;
+        right: 150px;
+        top: 410px;
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+      }
+      .kicker {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 28px;
+        letter-spacing: 0.14em;
+        color: var(--gold);
+      }
+      h1 {
+        font-family: "Archivo Black", sans-serif;
+        font-weight: 400;
+        font-size: 78px;
+        line-height: 0.94;
+        letter-spacing: -0.03em;
+        max-width: 860px;
+      }
+      h1 .line { display: block; }
+      h1 .hit { color: var(--miss); }
+      .sub {
+        max-width: 780px;
+        padding: 18px 22px;
+        background: #0e1522;
+        border: 3px solid var(--line);
+        border-radius: 16px;
+        font-size: 36px;
+        font-weight: 700;
+        line-height: 1.3;
+        color: var(--ink);
+      }
+      /* Real window captures, cropped so the theme name in the hero stays
+         readable. The frame is shorter than the source, and the image is
+         scaled up; overflow clips to the hero plus the top of the calendar.
+         Export uses a taller frame and pans, because the dialog title and
+         the download buttons cannot both sit in that frame at this size. */
+      .shot {
+        position: relative;
+        height: 440px;
+        overflow: hidden;
+        border-radius: 22px;
+        border: 3px solid var(--line);
+        background: #101820;
+      }
+      .shot-tall { height: 500px; }
+      .shot img {
+        position: absolute;
+        display: block;
+        width: 1680px;
+        height: auto;
+        max-width: none;
+        left: -11px;
+        top: -74px;
+      }
+      #shot-export img {
+        width: 1535px;
+        left: -376px;
+        top: -140px;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="30"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div class="ground" id="ground">
+        <div class="mesh" id="mesh" data-layout-ignore="true"></div>
+      </div>
+
+      <header class="chrome">
+        <div class="brand">Work <span>Tracker</span></div>
+        <div class="meta">YEAR-END</div>
+      </header>
+
+      <section id="scene-problem" class="clip" data-start="0" data-duration="9.9" data-track-index="1">
+        <div class="scene-inner">
+          <div class="kicker" id="kicker">THE PROBLEM · LIGHT</div>
+          <h1 id="headline-problem"><span class="line">You can't</span><span class="line hit">remember March.</span></h1>
+          <p class="sub" id="sub-problem">Appraisal season has arrived, and March is already hard to recall.</p>
+          <div class="shot" id="shot-light">
+            <img src="assets/shots/week.png" alt="" />
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-tool" class="clip" data-start="10" data-duration="9.9" data-track-index="2">
+        <div class="scene-inner">
+          <div class="kicker" id="kicker-tool">THE LOG · FOREST</div>
+          <h1 id="headline-tool"><span class="line">Write it down</span><span class="line">as it happens.</span></h1>
+          <p class="sub" id="sub-tool">Work Tracker saves that day's tasks and achievements.</p>
+          <div class="shot" id="shot-forest">
+            <img src="assets/shots/forest.png" alt="" />
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-proof" class="clip" data-start="20" data-duration="10" data-track-index="3">
+        <div class="scene-inner">
+          <div class="kicker" id="kicker-proof">ONE REPORT · LIGHT</div>
+          <h1 id="headline-proof"><span class="line">You get one report.</span></h1>
+          <p class="sub" id="sub-proof">This is the proof your annual review needs.</p>
+          <div class="shot shot-tall" id="shot-export">
+            <img src="assets/shots/export.png" alt="" />
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="repo" id="repo">https://ritz123.github.io/WorkTracker</div>
+        <div class="footer-label"><span>LOCAL DAYS</span><span>APPRAISAL REPORT</span></div>
+        <div class="track"><div id="progress"></div></div>
+      </footer>
+
+      <audio id="bgm" src="assets/bgm/track.mp3" data-start="0" data-duration="30" data-track-index="11" data-volume="1"></audio>
+    </div>
+    <script>
+      // 30s reel, music only. Each scene holds about ten seconds so the
+      // caption can be read: roughly half a second plus a third of a second
+      // per word, then a long dwell. Scenes do not overlap, because a
+      // crossfade left two captions on screen at once.
+      //
+      // The pictures are the real captures in advert/shots, not redrawn UI.
+      // week.png is Theme Light and forest.png is Theme Forest, cropped to
+      // the same window so the cut from navy to green is the theme change.
+      // That window is the hero ("LIGHT EDITION" / "FOREST EDITION" and the
+      // full tagline) plus the top of the calendar. Dark, Warm, Ocean, and
+      // Rose have no capture, so they are not shown.
+      // export.png is the Light export dialog. It pans from the dialog title
+      // down to Download PDF: at a size where the dates stay readable, the
+      // title and the buttons do not fit in the frame together. The pan
+      // starts after the title has been on screen, and it only moves y.
+      //
+      // The address is the public site, shown the whole reel:
+      // https://ritz123.github.io/WorkTracker.
+      // Music gain lives only on the volume tweens; data-volume stays 1
+      // because a tween replaces that attribute instead of scaling it.
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      tl.fromTo("#mesh", { y: 0 }, { y: 28, duration: 30, ease: "none" }, 0);
+      tl.fromTo("#progress", { scaleX: 0 }, { scaleX: 1, duration: 30, ease: "none" }, 0);
+      tl.fromTo("#bgm", { volume: 0 }, { volume: 0.42, duration: 0.8, ease: "power1.out" }, 0);
+      tl.to("#bgm", { volume: 0, duration: 1.1, ease: "power1.in", immediateRender: false }, 28.8);
+
+      tl.from("#kicker", { y: 22, opacity: 0, duration: 0.5, ease: "power3.out" }, 0.2);
+      tl.from("#headline-problem", { y: 48, opacity: 0, duration: 0.6, ease: "power4.out" }, 0.4);
+      tl.from("#sub-problem", { y: 24, opacity: 0, duration: 0.5, ease: "power2.out" }, 0.9);
+      tl.from("#shot-light", { y: 28, opacity: 0, duration: 0.55, ease: "power3.out" }, 1.3);
+      tl.to("#scene-problem", { opacity: 0, duration: 0.35, ease: "power2.in", immediateRender: false }, 9.5);
+
+      tl.from("#scene-tool", { opacity: 0, duration: 0.4, ease: "power2.out" }, 10);
+      tl.from("#headline-tool", { y: 40, duration: 0.55, ease: "power3.out" }, 10.15);
+      tl.from("#sub-tool", { y: 24, opacity: 0, duration: 0.45, ease: "power2.out" }, 10.55);
+      tl.from("#shot-forest", { y: 28, opacity: 0, duration: 0.55, ease: "power3.out" }, 11.0);
+      tl.to("#scene-tool", { opacity: 0, duration: 0.35, ease: "power2.in", immediateRender: false }, 19.5);
+
+      tl.from("#scene-proof", { opacity: 0, duration: 0.4, ease: "power2.out" }, 20);
+      tl.from("#headline-proof", { y: 36, duration: 0.5, ease: "power4.out" }, 20.15);
+      tl.from("#sub-proof", { y: 24, opacity: 0, duration: 0.45, ease: "power2.out" }, 20.55);
+      tl.from("#shot-export", { y: 28, opacity: 0, duration: 0.55, ease: "power3.out" }, 21.05);
+      tl.to("#shot-export img", { y: -203, duration: 5.2, ease: "power1.inOut", immediateRender: false }, 22.4);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

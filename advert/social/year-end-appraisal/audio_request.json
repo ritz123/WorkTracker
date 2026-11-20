@@ -1,0 +1,27 @@
+{
+  "provider": "heygen",
+  "lang": "en",
+  "speed": 1.02,
+  "voice": null,
+  "lines": [
+    {
+      "id": "problem",
+      "text": "Appraisal season. And you can't remember March.",
+      "sfx": ["soft page turn"]
+    },
+    {
+      "id": "tool",
+      "text": "Work Tracker writes the year down while you live it. Every task, every win.",
+      "sfx": ["soft ui click"]
+    },
+    {
+      "id": "proof",
+      "text": "One report. The proof your review actually needs.",
+      "sfx": ["paper stamp"]
+    }
+  ],
+  "bgm": {
+    "mode": "retrieve",
+    "query": "warm confident minimal piano pulse, short social ad underscore, no vocals, hopeful"
+  }
+}

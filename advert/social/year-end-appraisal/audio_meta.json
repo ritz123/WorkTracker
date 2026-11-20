@@ -1,0 +1,50 @@
+{
+  "tts_provider": "kokoro",
+  "voice_id": "am_michael",
+  "bgm": {
+    "path": "assets/bgm/track.mp3",
+    "volume": 0.9,
+    "query": "warm confident minimal piano pulse, short social ad underscore, no vocals, hopeful",
+    "mode": "retrieve",
+    "duration_s": 30
+  },
+  "bgm_pending": false,
+  "bgm_provider": "heygen",
+  "bgm_pid": null,
+  "bgm_log": null,
+  "bgm_mode": "retrieve",
+  "bgm_target_duration_s": null,
+  "bgm_seed_duration_s": null,
+  "bgm_loop_count": null,
+  "voices": [],
+  "sfx": [
+    {
+      "id": "problem",
+      "name": "soft page turn",
+      "file": "assets/sfx/soft-page-turn.mp3",
+      "source": "heygen",
+      "offset_s": 0,
+      "duration_s": 1.008,
+      "volume": 0.35
+    },
+    {
+      "id": "tool",
+      "name": "soft ui click",
+      "file": "assets/sfx/soft-ui-click.mp3",
+      "source": "heygen",
+      "offset_s": 0,
+      "duration_s": 0.576,
+      "volume": 0.35
+    },
+    {
+      "id": "proof",
+      "name": "paper stamp",
+      "file": "assets/sfx/paper-stamp.mp3",
+      "source": "heygen",
+      "offset_s": 0,
+      "duration_s": 1.2,
+      "volume": 0.35
+    }
+  ],
+  "total_duration_s": 0
+}
