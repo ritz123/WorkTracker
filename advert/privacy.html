@@ -3,15 +3,21 @@
 <head>
 <meta charset="utf-8">
 <!-- Google Tag Manager container GTM-MF9FCF3N.
-     Measurement ID G-CKLZRV5K84 is the Analytics destination configured
-     inside that container. gtm.js does not apply a gtag('config') on the
-     page, and a second Analytics tag here would count the same visit twice. -->
-<script async src="https://www.googletagmanager.com/gtm.js?id=GTM-MF9FCF3N"></script>
+     Measurement ID G-CKLZRV5K84 is the Analytics destination inside that
+     container. This site is hosted on ritz123.github.io, and github.io is a
+     public suffix. cookie_domain "auto" therefore tries Domain=github.io
+     first; Firefox rejects that write and logs an invalid-domain warning
+     for _ga_CKLZRV5K84. "none" stores a host-only cookie and skips the
+     probe. The set is queued before gtm.js so the container's first page
+     view uses it. Do not add gtag('config') here: that sends a second
+     page view. -->
 <script>
   window.dataLayer = window.dataLayer || [];
   function gtag(){dataLayer.push(arguments);}
+  gtag('set', 'cookie_domain', 'none');
   gtag('js', new Date());
 </script>
+<script async src="https://www.googletagmanager.com/gtm.js?id=GTM-MF9FCF3N"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy: Work Tracker</title>
 <meta name="description" content="Work Tracker stores the week on the computer that runs it. This site sends page views to Google Analytics.">
